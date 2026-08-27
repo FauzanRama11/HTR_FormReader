@@ -1,0 +1,12 @@
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+.venv/
+models/
+weights/
+checkpoints/
+__pycache__/
+*.pyc

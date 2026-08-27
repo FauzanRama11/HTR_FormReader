@@ -1,0 +1,1368 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>HTR Form OCR</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 1180px; margin: 30px auto; padding: 0 16px; color: #1f2937; background: #f3f4f6; }
+  h1 { font-size: 22px; color: #111827; }
+  h3 { margin-bottom: 8px; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 2px solid #e5e7eb; }
+  .tab-btn {
+    background: none; border: none; padding: 10px 18px; font-size: 14px; cursor: pointer;
+    color: #6b7280; border-bottom: 2px solid transparent; margin-bottom: -2px;
+  }
+  .tab-btn.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .upload-section { border: 2px dashed #999; padding: 20px; border-radius: 8px; text-align: center; margin-bottom: 24px; }
+  .sheet-input-row { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; }
+  input[type=text] { padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; width: 360px; font-size: 13px; }
+  button { background: #2563eb; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  button:disabled { background: #999; cursor: not-allowed; }
+  .or-sep { color: #9ca3af; font-size: 12px; margin: 10px 0; }
+
+  .preview-section { display: flex; gap: 20px; margin-bottom: 24px; }
+  .preview-col { flex: 1; min-width: 0; }
+  .preview-box {
+    border: 1px solid #ddd; border-radius: 6px; min-height: 300px; display: flex;
+    align-items: center; justify-content: center; background: #f9fafb; overflow: hidden;
+  }
+  .preview-box img { width: 100%; display: block; }
+  .preview-placeholder { color: #9ca3af; font-size: 13px; padding: 20px; }
+
+  .table-section { margin-bottom: 24px; background: #fff; border-radius: 10px; padding: 16px 18px; box-shadow: 0 1px 3px rgba(0,0,0,.07); }
+  .table-scroll { overflow-x: auto; border-radius: 8px; border: 1px solid #e5e7eb; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: #f8fafc; font-weight: 600; position: sticky; top: 0; }
+  tbody tr:nth-child(even) { background: #fafafa; }
+
+  .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; }
+  .toolbar-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .search-input { width: 240px; }
+  .hint-text { font-size: 12px; color: #6b7280; margin: 4px 0 12px; }
+  select { padding: 7px 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; }
+
+  .status-read, .status-present { color: #16a34a; }
+  .status-review, .status-uncertain { color: #d97706; font-weight: bold; }
+  .status-conflict { color: #ea580c; font-weight: bold; }
+  .status-not_detected, .status-error { color: #dc2626; }
+  .status-blank, .status-absent { color: #6b7280; }
+  .status-sesuai { color: #16a34a; font-weight: bold; }
+  .status-tidak_sesuai { color: #dc2626; font-weight: bold; }
+  .field-reason { cursor: help; border-bottom: 1px dotted #9ca3af; }
+
+  .loading-row td { text-align: center; color: #6b7280; padding: 20px; }
+  tr.record-row { cursor: pointer; }
+  tr.record-row:hover { background: #f3f4f6; }
+  tr.record-row.selected { background: #dbeafe; }
+
+  .selector-row { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .selector-row input[type=text] { width: 220px; }
+  .batch-summary { font-size: 12px; color: #4b5563; margin-bottom: 8px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge-pending, .badge-queued { background: #e5e7eb; color: #4b5563; }
+  .badge-processing { background: #dbeafe; color: #1d4ed8; }
+  .badge-done { background: #dcfce7; color: #15803d; }
+  .badge-error, .badge-no_document { background: #fee2e2; color: #b91c1c; }
+  .badge-passed { background: #dcfce7; color: #15803d; }
+  .badge-mismatch { background: #fee2e2; color: #b91c1c; }
+  .badge-incomplete { background: #e5e7eb; color: #4b5563; }
+  .badge-uncertain { background: #fef3c7; color: #b45309; }
+  /* Keputusan operasional (bukan status teknis) -- lihat resolveHasilAkhir() */
+  .badge-oke { background: #dcfce7; color: #15803d; }
+  .badge-tolak { background: #fee2e2; color: #b91c1c; }
+  .hasil-akhir-box { border-radius: 8px; padding: 10px 14px; margin: 8px 0 14px; border: 1px solid transparent; }
+  .hasil-akhir-title { font-size: 15px; font-weight: 700; }
+  .hasil-akhir-reason { font-size: 13px; margin-top: 2px; }
+  .hasil-akhir-ok { background: #dcfce7; border-color: #86efac; color: #15803d; }
+  .hasil-akhir-tolak { background: #fee2e2; border-color: #fca5a5; color: #b91c1c; }
+  .hasil-akhir-review { background: #fef3c7; border-color: #fde68a; color: #b45309; }
+
+  /* Summary teknis detail record: warna menunjukkan komposisi hasil field,
+     BUKAN keputusan bisnis. */
+  .field-summary-box { border-radius: 8px; padding: 10px 14px; margin: 8px 0 14px; border: 1px solid transparent; font-size: 13px; }
+  .field-summary-green { background: #dcfce7; border-color: #86efac; color: #166534; }
+  .field-summary-red { background: #fee2e2; border-color: #fca5a5; color: #991b1b; }
+  .field-summary-yellow { background: #fef3c7; border-color: #fde68a; color: #92400e; }
+  .field-summary-neutral { background: #f3f4f6; border-color: #d1d5db; color: #4b5563; }
+  .field-summary-line { margin: 3px 0; }
+  .field-summary-label { font-weight: 700; display: inline-block; min-width: 82px; }
+  .field-summary-intro { margin: 2px 0 8px; color: #4b5563; font-size: 13px; }
+  .detail-heading-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+  .detail-heading-row h3 { margin: 0; }
+  .final-status-cell { min-width: 210px; max-width: 290px; }
+  .final-status-cell .badge, #sheetDetailFinalStatus .badge { white-space: normal; line-height: 1.35; padding: 4px 8px; }
+
+
+  /* Kolom Status: satu kolom berisi progress-bar + persen + keterangan, TIDAK menumpuk di kolom lain */
+  .cell-status { min-width: 150px; }
+  .mini-progress-track { width: 100%; height: 7px; border-radius: 999px; background: #e5e7eb; overflow: hidden; margin-top: 3px; }
+  .mini-progress-bar { height: 100%; background: #2563eb; transition: width 0.25s ease; }
+  .mini-progress-bar.state-done { background: #16a34a; }
+  .mini-progress-bar.state-error { background: #dc2626; }
+  .mini-progress-top { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 11px; }
+  .mini-progress-note { font-size: 11px; color: #6b7280; margin-top: 2px; }
+
+  .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 5px; margin: 1px 3px 1px 0; }
+  .btn-run { background: #2563eb; }
+  .btn-check { background: #16a34a; }
+  .btn-rerun { background: #d97706; }
+  .action-cell { min-width: 150px; white-space: nowrap; }
+  .fail-reason { color: #b91c1c; font-size: 11px; }
+
+  .toolbar-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .tail-info { font-size: 12px; color: #4b5563; }
+  .pagination-row { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 10px; font-size: 13px; }
+  .pagination-row button { padding: 5px 12px; font-size: 12px; }
+  a.doc-link { color: #2563eb; text-decoration: underline; font-size: 12px; }
+
+  .progress-section {
+    display: none; border: 1px solid #d1d5db; border-radius: 8px; padding: 14px;
+    margin: 12px 0 24px; background: #f9fafb;
+  }
+  .progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; }
+  .progress-track { width: 100%; height: 12px; border-radius: 999px; background: #e5e7eb; overflow: hidden; }
+  .progress-bar { width: 0%; height: 100%; background: #2563eb; transition: width 0.25s ease; }
+  .progress-message { margin-top: 8px; font-size: 13px; font-weight: 600; }
+  .progress-steps { margin: 10px 0 0 20px; padding: 0; max-height: 180px; overflow-y: auto; font-size: 12px; color: #4b5563; }
+  .progress-steps li { margin: 3px 0; }
+  .progress-steps li.active { color: #1d4ed8; font-weight: 600; }
+  .progress-steps li.done { color: #15803d; }
+  .progress-steps li.error { color: #dc2626; }
+
+  #message, #sheetMessage { margin: 10px 0; font-size: 14px; }
+  .error-box { color: #dc2626; white-space: pre-wrap; font-size: 12px; }
+
+  details { margin-top: 8px; }
+  summary { cursor: pointer; font-weight: bold; margin-bottom: 8px; }
+  pre { background: #111827; color: #d1fae5; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; max-height: 500px; }
+</style>
+</head>
+<body>
+
+<h1>HTR Form OCR — Upload &amp; Ekstraksi Formulir</h1>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="tabFile">PDF / Image</button>
+  <button class="tab-btn" data-tab="tabSheet">Excel / Google Spreadsheet</button>
+</div>
+
+<!-- ======================= TAB 1: PDF / IMAGE ======================= -->
+<div class="tab-panel active" id="tabFile">
+  <div class="upload-section">
+    <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf">
+    <br><br>
+    <button id="processBtn">Proses Dokumen</button>
+  </div>
+  <div id="message"></div>
+
+  <div class="progress-section" id="progressSection">
+    <div class="progress-header"><strong>Status Proses</strong><span id="progressPercent">0%</span></div>
+    <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="progress-message" id="progressMessage">Menunggu proses...</div>
+    <ol class="progress-steps" id="progressSteps"></ol>
+  </div>
+
+  <div class="preview-section" id="previewSection" style="display:none;">
+    <div class="preview-col">
+      <h3>Template</h3>
+      <div class="preview-box" id="templateBox"><div class="preview-placeholder">Memuat template...</div></div>
+    </div>
+    <div class="preview-col">
+      <h3>Dokumen Diupload</h3>
+      <div class="preview-box" id="uploadedBox"><div class="preview-placeholder">Memuat preview...</div></div>
+    </div>
+  </div>
+
+  <div class="table-section" id="tableSection" style="display:none;">
+    <h3>Hasil Ekstraksi <span id="tab1FinalStatus"></span></h3>
+    <div id="tab1HasilAkhir" class="hasil-akhir-box" style="display:none;"></div>
+    <table id="resultTable">
+      <thead><tr><th>Field</th><th>Data Entry</th><th>Data OCR</th><th>Status</th></tr></thead>
+      <tbody id="resultBody"></tbody>
+    </table>
+  </div>
+
+  <details id="jsonDetails" style="display:none;">
+    <summary>Raw Structured JSON (untuk debugging)</summary>
+    <pre id="jsonOutput"></pre>
+  </details>
+
+  <div class="table-section" id="roiSection" style="display:none;">
+    <h3>Perbandingan ROI (Debug)</h3>
+    <p style="font-size:12px;color:#6b7280;margin:0 0 8px;">
+      Kotak biru = area ROI pada template. Pada dokumen: hijau = terbaca, oranye = perlu dicek, abu = kosong, merah = gagal.
+    </p>
+    <div class="preview-section" style="display:flex;">
+      <div class="preview-col"><h3>Template (ROI)</h3><div class="preview-box" id="roiTemplateBox"><div class="preview-placeholder">-</div></div></div>
+      <div class="preview-col"><h3>Dokumen Diupload (ROI)</h3><div class="preview-box" id="roiDocumentBox"><div class="preview-placeholder">-</div></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= TAB 2: EXCEL / GOOGLE SPREADSHEET ======================= -->
+<div class="tab-panel" id="tabSheet">
+  <div class="upload-section">
+    <div class="sheet-input-row">
+      <input type="file" id="sheetFileInput" accept=".xlsx,.xls">
+      <button id="sheetUploadBtn">Upload Excel</button>
+    </div>
+    <div class="or-sep">— atau —</div>
+    <div class="sheet-input-row">
+      <input type="text" id="sheetUrlInput" placeholder="Link Google Spreadsheet (harus publik/share view)">
+      <button id="sheetUrlBtn">Muat Spreadsheet</button>
+    </div>
+  </div>
+  <div id="sheetMessage"></div>
+
+  <div class="table-section" id="sheetTableSection" style="display:none;">
+    <h3>Daftar Record</h3>
+
+    <div class="toolbar">
+      <div class="toolbar-group">
+        <input type="text" id="sheetSearchInput" class="search-input" placeholder="Cari di tabel (nama, rekening, dll)...">
+      </div>
+      <div class="toolbar-group">
+        <input type="text" id="sheetSelectorInput" placeholder="Index/Range, mis. 1,3,5-8 (kosong = semua)">
+        <button id="sheetSubmitBtn" class="btn-sm">Jalankan Index/Range</button>
+      </div>
+      <div class="toolbar-group">
+        <span class="tail-info"><span id="checkedCount">0</span> dicentang</span>
+        <button id="sheetBulkRunBtn" class="btn-sm">Jalankan yang Dicentang</button>
+      </div>
+    </div>
+    <div class="batch-summary" id="sheetBatchSummary"></div>
+    <p class="hint-text">Klik <b>Run</b> pada baris untuk memproses 1 record. Klik <b>Lihat</b> pada record yang sudah selesai untuk membuka hasil tersimpan.</p>
+
+    <div class="toolbar-row" style="justify-content:space-between;">
+      <span class="tail-info" id="tailInfo"></span>
+      <div class="toolbar-group">
+        <label for="pageSizeSelect" style="font-size:12px;color:#4b5563;">Baris/halaman:</label>
+        <select id="pageSizeSelect">
+          <option value="5">5</option>
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+        </select>
+        <button id="tailMoreBtn" class="btn-sm">Tampilkan 500 record lagi</button>
+      </div>
+    </div>
+
+    <div class="table-scroll">
+      <table id="sheetTable">
+        <thead><tr id="sheetTableHead"></tr></thead>
+        <tbody id="sheetTableBody"></tbody>
+      </table>
+    </div>
+
+    <div class="pagination-row" id="paginationRow"></div>
+  </div>
+
+  <!-- Detail record: layout sama seperti Tab 1 -->
+  <div id="sheetDetail" style="display:none;">
+    <hr style="margin:24px 0;">
+    <h3 id="sheetDetailTitle">Detail Record</h3>
+    <div id="sheetDetailMessage"></div>
+
+    <div class="progress-section" id="sheetProgressSection">
+      <div class="progress-header"><strong>Status Proses</strong><span id="sheetProgressPercent">0%</span></div>
+      <div class="progress-track"><div class="progress-bar" id="sheetProgressBar"></div></div>
+      <div class="progress-message" id="sheetProgressMessage">Menunggu proses...</div>
+      <ol class="progress-steps" id="sheetProgressSteps"></ol>
+    </div>
+
+    <div class="preview-section">
+      <div class="preview-col">
+        <h3>Template</h3>
+        <div class="preview-box" id="sheetTemplateBox"><div class="preview-placeholder">-</div></div>
+      </div>
+      <div class="preview-col">
+        <h3>Dokumen (Drive)</h3>
+        <div class="preview-box" id="sheetUploadedBox"><div class="preview-placeholder">-</div></div>
+      </div>
+    </div>
+
+    <div class="table-section">
+      <div class="detail-heading-row">
+        <h3>Hasil Ekstraksi vs Data Entry</h3>
+        <span id="sheetDetailFinalStatus"></span>
+      </div>
+      <p class="field-summary-intro">Pemeriksaan difokuskan pada tujuh field utama berikut; status menunjukkan kesesuaian hasil OCR terhadap data entry.</p>
+      <div id="sheetFieldSummary" class="field-summary-box field-summary-neutral">Belum ada hasil.</div>
+      <h3 style="margin-top:16px;">Detail Per Field</h3>
+      <table id="sheetResultTable">
+        <thead><tr><th>Field</th><th>Data Entry</th><th>Data OCR</th><th>Status</th></tr></thead>
+        <tbody id="sheetResultBody"></tbody>
+      </table>
+    </div>
+
+    <details id="sheetJsonDetails" style="display:none;">
+      <summary>Raw Structured JSON (untuk debugging)</summary>
+      <pre id="sheetJsonOutput"></pre>
+    </details>
+
+    <div class="table-section" id="sheetRoiSection" style="display:none;">
+      <h3>Perbandingan ROI (Debug)</h3>
+      <div class="preview-section" style="display:flex;">
+        <div class="preview-col"><h3>Template (ROI)</h3><div class="preview-box" id="sheetRoiTemplateBox"><div class="preview-placeholder">-</div></div></div>
+        <div class="preview-col"><h3>Dokumen (ROI)</h3><div class="preview-box" id="sheetRoiDocumentBox"><div class="preview-placeholder">-</div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// TAB SWITCHING
+// ============================================================================
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById(btn.dataset.tab).classList.add("active");
+  });
+});
+
+// ============================================================================
+// HELPER: progress bar (dipakai ulang oleh Tab 1 & Tab 2)
+// ============================================================================
+function makeProgressController(els) {
+  let timer = null, keys = new Set(), lastLi = null;
+
+  function reset(initialMessage) {
+    if (timer) { clearTimeout(timer); timer = null; }
+    keys = new Set(); lastLi = null;
+    els.section.style.display = "block";
+    els.percent.textContent = "0%";
+    els.bar.style.width = "0%";
+    els.message.textContent = initialMessage || "Menyiapkan...";
+    els.steps.innerHTML = "";
+  }
+
+  function update(data) {
+    const percent = Number.isFinite(Number(data.percent)) ? Number(data.percent) : 0;
+    els.percent.textContent = `${percent}%`;
+    els.bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+    els.message.textContent = data.message || "Sedang diproses...";
+
+    const key = `${data.step || "step"}:${percent}`;
+    if (!keys.has(key)) {
+      if (lastLi && !lastLi.classList.contains("error")) {
+        lastLi.classList.remove("active");
+        lastLi.classList.add("done");
+      }
+      const li = document.createElement("li");
+      li.textContent = `${percent}% — ${data.message || data.step || "Proses"}`;
+      li.className = data.status === "error" ? "error" : "active";
+      els.steps.appendChild(li);
+      els.steps.scrollTop = els.steps.scrollHeight;
+      keys.add(key);
+      lastLi = li;
+    }
+    if (data.status === "done" && lastLi) {
+      lastLi.classList.remove("active");
+      lastLi.classList.add("done");
+    }
+  }
+
+  function stop() {
+    if (timer) { clearTimeout(timer); timer = null; }
+  }
+
+  async function poll(requestId) {
+    stop();
+    async function tick() {
+      try {
+        const res = await fetch(`/api/progress/${requestId}`, { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          update(data);
+          if (data.status === "done" || data.status === "error") { timer = null; return; }
+        }
+      } catch (_) { /* OCR utama tetap berjalan walau satu polling gagal */ }
+      timer = setTimeout(tick, 400);
+    }
+    tick();
+  }
+
+  return { reset, update, stop, poll };
+}
+
+// Tabel hasil: Field, Data Entry, Data OCR, Status (dipakai Tab 1 & Tab 2).
+// Untuk Tab 1 (tidak ada data entry) kolom "Data Entry" ditampilkan "-".
+function renderFieldsTable(tbody, fields, withDataEntry) {
+  tbody.innerHTML = "";
+  fields.forEach((f) => {
+    const tr = document.createElement("tr");
+    const ocrValue = f.ocr_result ?? "-";
+    const conf = (f.confidence !== null && f.confidence !== undefined) ? ` (conf: ${f.confidence.toFixed(2)})` : "";
+    const dataEntry = withDataEntry ? (f.data_entry ?? "-") : "-";
+    const displayStatus = withDataEntry ? (f.display_status || f.status || "-") : (f.status || "-");
+    // Alasan per field (mis. sumber inferensi tenor/reward, atau detail
+    // spreadsheet vs dokumen saat mismatch) -- ditampilkan sbg tooltip.
+    const reasonParts = [f.source ? `sumber: ${f.source}` : null, f.reason || null].filter(Boolean);
+    const reasonAttr = reasonParts.length ? ` title="${reasonParts.join(" — ").replace(/"/g, "&quot;")}"` : "";
+    const statusClass = reasonParts.length ? `status-${displayStatus} field-reason` : `status-${displayStatus}`;
+    tr.innerHTML = `
+      <td><b>${f.field}</b><br><small>${f.type}</small></td>
+      <td>${dataEntry}</td>
+      <td>${ocrValue}${conf}</td>
+      <td class="${statusClass}"${reasonAttr}>${displayStatus}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// ============================================================================
+// TAB 1: PDF / IMAGE
+// ============================================================================
+const fileInput = document.getElementById("fileInput");
+const processBtn = document.getElementById("processBtn");
+const messageBox = document.getElementById("message");
+const previewSection = document.getElementById("previewSection");
+const templateBox = document.getElementById("templateBox");
+const uploadedBox = document.getElementById("uploadedBox");
+const tableSection = document.getElementById("tableSection");
+const resultBody = document.getElementById("resultBody");
+const jsonDetails = document.getElementById("jsonDetails");
+const jsonOutput = document.getElementById("jsonOutput");
+const roiSection = document.getElementById("roiSection");
+const roiTemplateBox = document.getElementById("roiTemplateBox");
+const roiDocumentBox = document.getElementById("roiDocumentBox");
+
+const fileProgress = makeProgressController({
+  section: document.getElementById("progressSection"),
+  percent: document.getElementById("progressPercent"),
+  bar: document.getElementById("progressBar"),
+  message: document.getElementById("progressMessage"),
+  steps: document.getElementById("progressSteps"),
+});
+
+loadTemplatePreview(templateBox);
+
+async function loadTemplatePreview(box) {
+  try {
+    const res = await fetch("/api/template-preview");
+    const data = await res.json();
+    box.innerHTML = res.ok ? `<img src="${data.preview_url}" alt="template">` : `<div class="preview-placeholder">Gagal memuat template</div>`;
+  } catch {
+    box.innerHTML = `<div class="preview-placeholder">Gagal memuat template</div>`;
+  }
+}
+
+function showLoadingRow(tbody, colspan, text) {
+  tbody.innerHTML = `<tr class="loading-row"><td colspan="${colspan}">${text}</td></tr>`;
+}
+
+processBtn.addEventListener("click", async () => {
+  const file = fileInput.files[0];
+  if (!file) { messageBox.textContent = "Pilih file terlebih dahulu (jpg/jpeg/png/pdf)."; return; }
+
+  processBtn.disabled = true;
+  messageBox.textContent = "";
+  fileProgress.reset("Mengupload dokumen...");
+  previewSection.style.display = "flex";
+  tableSection.style.display = "block";
+  jsonDetails.style.display = "none";
+  roiSection.style.display = "none";
+  uploadedBox.innerHTML = `<div class="preview-placeholder">Mengupload...</div>`;
+  showLoadingRow(resultBody, 4, "Menunggu proses OCR selesai...");
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
+    const uploadData = await uploadRes.json();
+    if (!uploadRes.ok) {
+      messageBox.innerHTML = `<div class="error-box">${uploadData.error || "Gagal upload"}</div>`;
+      processBtn.disabled = false;
+      return;
+    }
+
+    uploadedBox.innerHTML = `<img src="${uploadData.preview_url}" alt="uploaded document">`;
+    messageBox.textContent = "Dokumen terupload. Menjalankan OCR...";
+    fileProgress.poll(uploadData.request_id);
+
+    const processRes = await fetch(`/api/process/${uploadData.request_id}`, { method: "POST" });
+    const processData = await processRes.json();
+
+    if (!processRes.ok) {
+      fileProgress.stop();
+      showLoadingRow(resultBody, 4, "Gagal memproses OCR.");
+      messageBox.innerHTML = `<div class="error-box">${processData.error || "Terjadi kesalahan"}\n${processData.detail || ""}</div>`;
+      return;
+    }
+
+    fileProgress.stop();
+    fileProgress.update({ status: "done", step: "done", percent: 100, message: "Selesai diproses" });
+    renderFieldsTable(resultBody, processData.fields, false);
+    document.getElementById("tab1FinalStatus").innerHTML = hasilAkhirBadgeHtml(
+      resolveHasilAkhir(processData.final_status, processData.decision_v9_2)
+    );
+    renderHasilAkhir(document.getElementById("tab1HasilAkhir"), processData.final_status, processData.decision_v9_2);
+    jsonOutput.textContent = JSON.stringify(processData.raw_json, null, 2);
+    jsonDetails.style.display = "block";
+
+    if (processData.roi_template_url && processData.roi_document_url) {
+      roiTemplateBox.innerHTML = `<img src="${processData.roi_template_url}" alt="roi template">`;
+      roiDocumentBox.innerHTML = `<img src="${processData.roi_document_url}" alt="roi document">`;
+      roiSection.style.display = "block";
+    }
+    messageBox.textContent = "Selesai diproses.";
+  } catch (err) {
+    fileProgress.stop();
+    showLoadingRow(resultBody, 4, "Gagal memproses.");
+    messageBox.innerHTML = `<div class="error-box">Gagal menghubungi server: ${err}</div>`;
+  } finally {
+    processBtn.disabled = false;
+  }
+});
+
+// ============================================================================
+// TAB 2: EXCEL / GOOGLE SPREADSHEET
+// Flow: ambil data -> pilih index/range -> submit (batch async di background)
+// -> tabel terisi PERLAHAN sambil polling status -> klik baris "done" HANYA
+// fetch hasil yang sudah jadi (tidak memproses ulang) -> cache ke localStorage.
+// ============================================================================
+const sheetFileInput = document.getElementById("sheetFileInput");
+const sheetUploadBtn = document.getElementById("sheetUploadBtn");
+const sheetUrlInput = document.getElementById("sheetUrlInput");
+const sheetUrlBtn = document.getElementById("sheetUrlBtn");
+const sheetMessage = document.getElementById("sheetMessage");
+const sheetTableSection = document.getElementById("sheetTableSection");
+const sheetTableHead = document.getElementById("sheetTableHead");
+const sheetTableBody = document.getElementById("sheetTableBody");
+const sheetSelectorInput = document.getElementById("sheetSelectorInput");
+const sheetSubmitBtn = document.getElementById("sheetSubmitBtn");
+const sheetBulkRunBtn = document.getElementById("sheetBulkRunBtn");
+const sheetSearchInput = document.getElementById("sheetSearchInput");
+const pageSizeSelect = document.getElementById("pageSizeSelect");
+const checkedCountEl = document.getElementById("checkedCount");
+const sheetBatchSummary = document.getElementById("sheetBatchSummary");
+const tailInfo = document.getElementById("tailInfo");
+const tailMoreBtn = document.getElementById("tailMoreBtn");
+const paginationRow = document.getElementById("paginationRow");
+
+const sheetDetail = document.getElementById("sheetDetail");
+const sheetDetailTitle = document.getElementById("sheetDetailTitle");
+const sheetDetailFinalStatus = document.getElementById("sheetDetailFinalStatus");
+const sheetDetailMessage = document.getElementById("sheetDetailMessage");
+const sheetTemplateBox = document.getElementById("sheetTemplateBox");
+const sheetUploadedBox = document.getElementById("sheetUploadedBox");
+const sheetResultBody = document.getElementById("sheetResultBody");
+const sheetFieldSummary = document.getElementById("sheetFieldSummary");
+const sheetJsonDetails = document.getElementById("sheetJsonDetails");
+const sheetJsonOutput = document.getElementById("sheetJsonOutput");
+const sheetRoiSection = document.getElementById("sheetRoiSection");
+const sheetRoiTemplateBox = document.getElementById("sheetRoiTemplateBox");
+const sheetRoiDocumentBox = document.getElementById("sheetRoiDocumentBox");
+
+const sheetProgress = makeProgressController({
+  section: document.getElementById("sheetProgressSection"),
+  percent: document.getElementById("sheetProgressPercent"),
+  bar: document.getElementById("sheetProgressBar"),
+  message: document.getElementById("sheetProgressMessage"),
+  steps: document.getElementById("sheetProgressSteps"),
+});
+
+const LS_LAST_SESSION_KEY = "htr_last_session_id";
+const lsSessionKey = (id) => `htr_sheet_session_${id}`;
+const lsResultKey = (id, no) => `htr_sheet_result_${id}_${no}`;
+
+// Kolom data yang ditampilkan di tabel Tab 2, sesuai spesifikasi.
+const DATA_COLUMNS = [
+  "Nomor Rekening", "Nama Nasabah", "Nominal Penempatan", "Tenor Hold", "Pilihan Hadiah", "Surat Pernyataan",
+];
+const TAIL_DEFAULT = 500;
+const TAIL_STEP = 500;
+
+let currentSessionId = null;
+let currentRecords = [];
+let batchStatus = {};       // record_no -> status string
+let batchProgress = {};     // record_no -> {percent, message}
+let batchFinalStatus = {};  // record_no -> "PASSED" | "MISMATCH" | "INCOMPLETE" | "UNCERTAIN" | "ERROR" (teknis)
+let batchDecision = {};     // record_no -> decision_v9_2 {decision, reasons, hasil_akhir?, alasan?} (kalau backend kirim)
+let batchErrors = {};       // record_no -> alasan gagal (string)
+let checkedRecords = new Set();
+let tailSize = TAIL_DEFAULT;
+let pageSize = 25;
+let currentPage = 1;
+let batchTimer = null;
+let searchQuery = "";
+let activeRunNos = new Set();   // record yang sedang dalam satu proses submit aktif (single/bulk/index)
+let finalStatusHydrationInFlight = new Set(); // fetch hasil tersimpan utk membuat Final Status ringkas tanpa OCR ulang
+
+// Terkunci selama ADA record dari batch submit terakhir yang masih queued/processing --
+// mengunci checkbox, tombol bulk/index, dan tombol run baris lain supaya tidak saling tabrak.
+function isRunLocked() {
+  for (const no of activeRunNos) {
+    const s = batchStatus[no];
+    if (s === "queued" || s === "processing") return true;
+  }
+  return false;
+}
+
+function saveSessionToLocalStorage() {
+  try {
+    localStorage.setItem(LS_LAST_SESSION_KEY, currentSessionId);
+    localStorage.setItem(lsSessionKey(currentSessionId), JSON.stringify({
+      records: currentRecords, status: batchStatus, finalStatus: batchFinalStatus,
+      decision: batchDecision, errors: batchErrors,
+    }));
+  } catch (_) { /* localStorage penuh/nonaktif -> lewati saja, tidak fatal */ }
+}
+
+function restoreLastSessionFromLocalStorage() {
+  try {
+    const lastId = localStorage.getItem(LS_LAST_SESSION_KEY);
+    if (!lastId) return;
+    const raw = localStorage.getItem(lsSessionKey(lastId));
+    if (!raw) return;
+    const cached = JSON.parse(raw);
+    currentSessionId = lastId;
+    currentRecords = cached.records || [];
+    batchStatus = cached.status || {};
+    batchFinalStatus = cached.finalStatus || {};
+    batchDecision = cached.decision || {};
+    batchErrors = cached.errors || {};
+    if (currentRecords.length) {
+      renderSheetTable();
+      sheetMessage.textContent = `Memuat ulang sesi terakhir (${currentRecords.length} record) dari penyimpanan lokal.`;
+    }
+  } catch (_) { /* cache rusak -> abaikan, mulai dari kosong */ }
+}
+restoreLastSessionFromLocalStorage();
+
+sheetUploadBtn.addEventListener("click", async () => {
+  const file = sheetFileInput.files[0];
+  if (!file) { sheetMessage.textContent = "Pilih file Excel terlebih dahulu."; return; }
+  const formData = new FormData();
+  formData.append("file", file);
+  await loadSheetRecords(fetch("/api/sheet/upload", { method: "POST", body: formData }));
+});
+
+sheetUrlBtn.addEventListener("click", async () => {
+  const url = sheetUrlInput.value.trim();
+  if (!url) { sheetMessage.textContent = "Masukkan link Google Spreadsheet terlebih dahulu."; return; }
+  await loadSheetRecords(fetch("/api/sheet/load-url", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }),
+  }));
+});
+
+async function loadSheetRecords(fetchPromise) {
+  sheetMessage.textContent = "Memuat data...";
+  sheetDetail.style.display = "none";
+  stopBatchPolling();
+  try {
+    const res = await fetchPromise;
+    const data = await res.json();
+    if (!res.ok) {
+      sheetMessage.innerHTML = `<div class="error-box">${data.error || "Gagal memuat data"}\n${data.detail || ""}</div>`;
+      return;
+    }
+    currentSessionId = data.session_id;
+    currentRecords = data.records;
+    batchStatus = {};
+    batchProgress = {};
+    batchFinalStatus = {};
+    batchDecision = {};
+    batchErrors = {};
+    checkedRecords = new Set();
+    activeRunNos = new Set();
+    tailSize = TAIL_DEFAULT;
+    currentPage = 1;
+    searchQuery = "";
+    sheetSearchInput.value = "";
+    currentRecords.forEach((r) => { batchStatus[r.Record] = "pending"; });
+    renderSheetTable();
+    saveSessionToLocalStorage();
+    sheetMessage.textContent = `${currentRecords.length} record dimuat (index dari sumber, tidak dibuat baru). `
+      + `Jalankan lewat tombol Run per baris, centang + "Jalankan yang Dicentang", atau isi index/range.`;
+  } catch (err) {
+    sheetMessage.innerHTML = `<div class="error-box">Gagal menghubungi server: ${err}</div>`;
+  }
+}
+
+function statusBadge(status) {
+  const label = status || "pending";
+  return `<span class="badge badge-${label}">${label}</span>`;
+}
+
+// ============================================================================
+// KEPUTUSAN OPERASIONAL (bukan status teknis) -- V10 frontend fix.
+// Status teknis mentah (PASSED/MISMATCH/INCOMPLETE/UNCERTAIN/ERROR dari
+// comparison.compute_final_status, atau OK/TOLAK/REVIEW dari
+// comparison.compute_decision_v9_2) TIDAK PERNAH ditampilkan langsung sbg
+// hasil akhir utama -- hanya dipakai internal utk menentukan 2 label bisnis:
+//   "OK, Lanjut Proses"   atau   "TOLAK — <alasan spesifik>"
+// Status teknis tetap disimpan (title/tooltip) utk debugging, dan status
+// PER-FIELD di tabel detail (renderFieldsTable) TIDAK diubah sama sekali.
+//
+// Prioritas sumber data (poin 4 permintaan): decision_v9_2.hasil_akhir/alasan
+// (kalau backend suatu saat sudah menyediakannya langsung) -> decision_v9_2
+// .decision + .reasons[] (bentuk yang SUDAH tersedia sekarang dari
+// comparison.compute_decision_v9_2) -> fallback final_status teknis lama
+// (dipakai batch-status polling yg belum mengirim decision_v9_2 per record).
+// ============================================================================
+const FINAL_STATUS_FALLBACK_REASON = {
+  MISMATCH: "Data tidak sesuai dengan referensi",
+  INCOMPLETE: "Hasil OCR tidak dapat dipastikan (ada field belum terbaca)",
+  UNCERTAIN: "Hasil OCR tidak dapat dipastikan",
+  ERROR: "Proses gagal",
+};
+
+// Label field decisive (5 field V9.2, + signature) utk headline TOLAK --
+// hanya NAMA FIELD, tanpa kalimat detail (dokumen=... vs referensi=...).
+const DECISIVE_FIELD_LABELS = {
+  nama_nasabah: "Nama Nasabah",
+  nomor_rekening: "Nomor Rekening",
+  nominal_penempatan: "Nominal Penempatan",
+  tenor_penempatan: "Tenor",
+  bentuk_reward: "Bentuk Reward",
+  signature_nasabah: "TTD Nasabah",
+  signature_atasan: "TTD BRI",
+};
+const DECISIVE_FIELD_ORDER = [
+  "nama_nasabah", "nomor_rekening", "nominal_penempatan", "tenor_penempatan",
+  "bentuk_reward", "signature_nasabah", "signature_atasan",
+];
+
+function normalizeDecisionCheck(value) {
+  return String(value || "").trim().toUpperCase().replace(/[- ]/g, "_");
+}
+
+function compactFieldList(labels, limit = 3) {
+  if (labels.length <= limit) return labels.join(", ");
+  return `${labels.slice(0, limit).join(", ")} +${labels.length - limit} field lain`;
+}
+
+// Buat alasan Final Status yang ringkas: sebut nama field, tanpa membocorkan
+// detail nilai dokumen vs referensi. Contoh:
+//   TOLAK — Nama Nasabah, Nominal Penempatan tidak sesuai
+//   TOLAK — Bentuk Reward perlu dipastikan
+function conciseDecisionReason(decision) {
+  if (!decision) return "";
+  const failed = [];
+  const review = [];
+  const checks = decision.checks || {};
+
+  DECISIVE_FIELD_ORDER.forEach((key) => {
+    const state = normalizeDecisionCheck(checks[key]);
+    if (!state || ["OK", "PASSED", "PASS", "SESUAI"].includes(state)) return;
+    const label = DECISIVE_FIELD_LABELS[key] || key;
+    if (["REVIEW", "UNCERTAIN", "INCOMPLETE", "NOT_SURE"].includes(state)) review.push(label);
+    else failed.push(label);
+  });
+
+  // Fallback dari reason backend jika checks belum lengkap. Hanya ambil nama
+  // field, bukan nilai yang salah.
+  const reasonText = [decision.alasan, ...(Array.isArray(decision.reasons) ? decision.reasons : [])]
+    .filter(Boolean).join(" ").toLowerCase();
+  const addUnique = (arr, label) => { if (!failed.includes(label) && !review.includes(label) && !arr.includes(label)) arr.push(label); };
+  const keywordMap = [
+    [/nama/, "Nama Nasabah"],
+    [/(nomor rekening|no\.? ?rek|rekening)/, "Nomor Rekening"],
+    [/(nominal|pembilang|terbilang)/, "Nominal Penempatan"],
+    [/(tenor|range tanggal|rentang tanggal)/, "Tenor"],
+    [/(reward|tunai|non[ -]?tunai|hadiah|cashback|barang)/, "Bentuk Reward"],
+    [/(ttd nasabah|tanda tangan nasabah)/, "TTD Nasabah"],
+    [/(ttd bri|ttd pihak bri|ttd atasan|tanda tangan bri|tanda tangan pihak bri)/, "TTD BRI"],
+  ];
+  keywordMap.forEach(([rx, label]) => { if (rx.test(reasonText)) addUnique(failed, label); });
+
+  // Rule template tidak masuk 7 field utama, tetapi tetap relevan untuk Final Status atas.
+  const templateIssue = /(template|surat pernyataan)/.test(reasonText);
+
+  const parts = [];
+  if (failed.length) parts.push(`${compactFieldList(failed)} tidak sesuai`);
+  if (review.length) parts.push(`${compactFieldList(review)} perlu dipastikan`);
+  if (templateIssue && !parts.some((p) => p.includes("Surat Pernyataan"))) parts.push("Surat Pernyataan tidak sesuai");
+  return parts.join("; ");
+}
+
+function resolveHasilAkhir(finalStatus, decision) {
+  const technicalStatus = finalStatus || null;
+  const technicalDecision = (decision && decision.decision) || null;
+  const reasons = (decision && Array.isArray(decision.reasons)) ? decision.reasons.filter(Boolean) : [];
+
+  // Keputusan bisnis dari backend tetap menjadi sumber utama. Frontend hanya
+  // memendekkan keterangannya menjadi nama field yang bermasalah.
+  if (decision) {
+    const decisionText = String(technicalDecision || decision.hasil_akhir || "").toUpperCase();
+    const ok = decisionText === "OK" || decisionText === "OKE" || decisionText.includes("LANJUT");
+    const isReject = decisionText === "TOLAK" || decisionText === "REVIEW" || (!ok && Boolean(decision.hasil_akhir));
+
+    if (ok) {
+      return { ok: true, headline: "OK, Lanjut Proses", reasons, technicalStatus, technicalDecision };
+    }
+    if (isReject || technicalDecision) {
+      const concise = conciseDecisionReason(decision) || "Data tidak sesuai";
+      return { ok: false, headline: `TOLAK — ${concise}`, reasons, technicalStatus, technicalDecision };
+    }
+  }
+
+  // Fallback bila batch-status lama belum mengirim decision_v9_2 per record.
+  if (!technicalStatus) return { ok: null, headline: "-", reasons: [], technicalStatus, technicalDecision };
+  const fsUpper = String(technicalStatus).toUpperCase();
+  if (fsUpper === "PASSED") {
+    return { ok: true, headline: "OK, Lanjut Proses", reasons: [], technicalStatus, technicalDecision };
+  }
+  const reason = FINAL_STATUS_FALLBACK_REASON[fsUpper] || "Perlu pemeriksaan manual";
+  return { ok: false, headline: `TOLAK — ${reason}`, reasons: [reason], technicalStatus, technicalDecision };
+}
+
+// Badge kompak (dipakai di kolom tabel & header ringkas) -- hanya 2 warna/label
+// operasional, headline berisi NAMA FIELD saja (tanpa detail). Status teknis
+// & kalimat detail lengkap tetap ada sbg tooltip (title) utk debugging.
+function hasilAkhirBadgeHtml(resolved) {
+  if (resolved.ok === null) return "-";
+  const cls = resolved.ok ? "oke" : "tolak";
+  const debugParts = [];
+  if (resolved.technicalStatus) debugParts.push(`status teknis: ${resolved.technicalStatus}`);
+  if (resolved.technicalDecision) debugParts.push(`decision_v9_2: ${resolved.technicalDecision}`);
+  if (resolved.reasons.length) debugParts.push(`detail: ${resolved.reasons.join(" | ")}`);
+  const titleAttr = debugParts.length ? ` title="${debugParts.join(" | ").replace(/"/g, "&quot;")}"` : "";
+  return `<span class="badge badge-${cls}"${titleAttr}>${resolved.headline}</span>`;
+}
+
+// Kotak "Hasil Akhir" besar, ditampilkan SEBELUM tabel detail per-field.
+// Judul = nama field saja (TOLAK — Nama Nasabah, Tenor); kalimat detail
+// lengkap & status teknis ditaruh di bawah sbg baris debug terpisah,
+// TIDAK ikut di judul utama.
+function renderHasilAkhir(el, finalStatus, decision) {
+  if (!el) return;
+  const r = resolveHasilAkhir(finalStatus, decision);
+  if (r.ok === null) {
+    el.style.display = "none";
+    el.innerHTML = "";
+    return;
+  }
+  el.className = `hasil-akhir-box hasil-akhir-${r.ok ? "ok" : "tolak"}`;
+  el.style.display = "block";
+  el.innerHTML = `
+    <div class="hasil-akhir-title">Hasil Akhir: ${r.headline}</div>`
+    + (r.reasons.length ? `<div class="hasil-akhir-reason" style="opacity:.75;">Detail (debug): ${r.reasons.join(" | ")}</div>` : "")
+    + (r.technicalStatus ? `<div class="hasil-akhir-reason" style="opacity:.6;">Status teknis (debug): ${r.technicalStatus}${r.technicalDecision ? " / " + r.technicalDecision : ""}</div>` : "");
+}
+
+
+// ============================================================================
+// SUMMARY TEKNIS DETAIL RECORD
+// Hanya meringkas status per-field: PASSED / MISMATCH / UNCERTAIN.
+// Warna: semua PASSED = hijau; semua MISMATCH = merah; selain itu = kuning.
+// ============================================================================
+function normalizeFieldSummaryStatus(field) {
+  const raw = String(field.display_status || field.status || "").trim().toUpperCase().replace(/[- ]/g, "_");
+  if (["PASSED", "PASS", "OK", "SESUAI", "READ", "PRESENT"].includes(raw)) return "PASSED";
+  if (["MISMATCH", "TIDAK_SESUAI", "CONFLICT", "NOT_DETECTED", "ABSENT", "ERROR"].includes(raw)) return "MISMATCH";
+  if (["UNCERTAIN", "REVIEW", "INCOMPLETE", "BLANK", "NOT_SURE"].includes(raw)) return "UNCERTAIN";
+  return "UNCERTAIN";
+}
+
+// Hanya 7 field ini yang masuk summary detail.
+const SUMMARY_FIELDS = [
+  { key: "nama_nasabah", label: "Nama Nasabah", aliases: ["nama_nasabah", "nama nasabah", "nama"] },
+  { key: "nomor_rekening", label: "Nomor Rekening", aliases: ["nomor_rekening", "nomor rekening", "no rekening", "norek"] },
+  { key: "nominal_penempatan", label: "Nominal Penempatan", aliases: ["nominal_penempatan", "nominal penempatan", "nominal"] },
+  { key: "tenor_penempatan", label: "Tenor", aliases: ["tenor_penempatan", "tenor penempatan", "tenor hold", "tenor"] },
+  { key: "bentuk_reward", label: "Bentuk Reward", aliases: ["bentuk_reward", "bentuk reward", "pilihan hadiah", "reward"] },
+  { key: "signature_nasabah", label: "TTD Nasabah", aliases: ["signature_nasabah", "ttd nasabah", "tanda tangan nasabah"] },
+  { key: "signature_atasan", label: "TTD BRI", aliases: ["signature_atasan", "ttd bri", "ttd pihak bri", "ttd atasan", "ttd unit kerja", "tanda tangan bri"] },
+];
+
+function normalizeFieldName(value) {
+  return String(value || "").toLowerCase().replace(/[_-]+/g, " ").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function findSummaryField(fields, config) {
+  const aliases = config.aliases.map(normalizeFieldName);
+  return (fields || []).find((f) => {
+    const candidates = [f.field, f.type, f.key, f.name].map(normalizeFieldName).filter(Boolean);
+    return candidates.some((candidate) => aliases.some((alias) => candidate === alias || candidate.includes(alias) || alias.includes(candidate)));
+  });
+}
+
+function buildFieldSummary(fields) {
+  const groups = { PASSED: [], MISMATCH: [], UNCERTAIN: [] };
+  SUMMARY_FIELDS.forEach((config) => {
+    const f = findSummaryField(fields, config);
+    if (!f) return;
+    groups[normalizeFieldSummaryStatus(f)].push(config.label);
+  });
+
+  const total = groups.PASSED.length + groups.MISMATCH.length + groups.UNCERTAIN.length;
+  let color = "neutral";
+  if (total > 0 && groups.PASSED.length === total) color = "green";
+  else if (total > 0 && groups.MISMATCH.length === total) color = "red";
+  else if (total > 0) color = "yellow";
+  return { groups, total, color };
+}
+
+function renderFieldSummary(el, fields) {
+  if (!el) return;
+  const summary = buildFieldSummary(fields);
+  el.className = `field-summary-box field-summary-${summary.color}`;
+  if (!summary.total) {
+    el.innerHTML = "Belum ada hasil pemeriksaan untuk tujuh field utama.";
+    return;
+  }
+  const lines = [];
+  if (summary.groups.PASSED.length) {
+    lines.push(`<div class="field-summary-line"><span class="field-summary-label">PASSED:</span> ${summary.groups.PASSED.join(", ")}</div>`);
+  }
+  if (summary.groups.UNCERTAIN.length) {
+    lines.push(`<div class="field-summary-line"><span class="field-summary-label">UNCERTAIN:</span> ${summary.groups.UNCERTAIN.join(", ")}</div>`);
+  }
+  if (summary.groups.MISMATCH.length) {
+    lines.push(`<div class="field-summary-line"><span class="field-summary-label">MISMATCH:</span> ${summary.groups.MISMATCH.join(", ")}</div>`);
+  }
+  el.innerHTML = lines.join("");
+}
+
+// Jika batch-status hanya mengirim final_status teknis (mis. MISMATCH) tanpa
+// decision_v9_2, ambil HASIL YANG SUDAH TERSIMPAN lewat endpoint result.
+// Ini tidak menjalankan OCR ulang. Tujuannya agar Final Status tabel atas tetap
+// bisa menyebut field bermasalah secara ringkas.
+function presentationDecisionFromResult(data) {
+  if (data && data.decision_v9_2) return data.decision_v9_2;
+  const fs = String((data && data.final_status) || "").toUpperCase();
+  const checks = {};
+  SUMMARY_FIELDS.forEach((config) => {
+    const f = findSummaryField((data && data.fields) || [], config);
+    if (!f) return;
+    const st = normalizeFieldSummaryStatus(f);
+    checks[config.key] = st === "PASSED" ? "OK" : st === "UNCERTAIN" ? "REVIEW" : "TOLAK";
+  });
+  return { decision: fs === "PASSED" ? "OK" : "TOLAK", checks, reasons: [] };
+}
+
+async function hydrateFinalStatusForRecord(recordNo) {
+  const no = String(recordNo);
+  if (!currentSessionId || batchDecision[no] || finalStatusHydrationInFlight.has(no)) return;
+  if ((batchStatus[no] || batchStatus[recordNo]) !== "done") return;
+  finalStatusHydrationInFlight.add(no);
+  try {
+    const res = await fetch(`/api/sheet/result/${currentSessionId}/${no}`, { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    batchDecision[no] = presentationDecisionFromResult(data);
+    try { localStorage.setItem(lsResultKey(currentSessionId, no), JSON.stringify(data)); } catch (_) { /* abaikan */ }
+    saveSessionToLocalStorage();
+    updateStatusCells();
+  } catch (_) {
+    // Fallback generic tetap dipakai jika hasil tersimpan belum dapat diambil.
+  } finally {
+    finalStatusHydrationInFlight.delete(no);
+  }
+}
+
+function hydrateDoneFinalStatuses(statusMap) {
+  // Batasi ke halaman yang sedang terlihat agar batch besar tidak memicu
+  // ratusan request detail sekaligus. Halaman lain akan di-hydrate saat dibuka.
+  const visible = new Set(getPageRecords().map((r) => String(r.Record)));
+  Object.entries(statusMap || {}).forEach(([no, status]) => {
+    if (visible.has(String(no)) && status === "done" && !batchDecision[no]) hydrateFinalStatusForRecord(no);
+  });
+}
+
+// --- Sel kolom Status: SATU kolom = badge kecil + progress bar + persen + keterangan.
+// Untuk status gagal, keterangan berisi ALASAN gagal (dari batchErrors), bukan cuma "Gagal". ---
+function statusCellHtml(recordNo) {
+  const status = batchStatus[recordNo] || "pending";
+  const p = batchProgress[recordNo];
+  const isFailed = status === "error" || status === "no_document";
+  // status "done" SELALU tampil 100% -- jangan pakai progress lama yg mungkin
+  // masih tersimpan di bawah 100% (record ini sudah tuntas, bukan macet).
+  const percent = status === "done" ? 100 : isFailed ? 100
+    : (p ? Math.max(0, Math.min(100, Number(p.percent) || 0)) : 0);
+  const reason = batchErrors[recordNo];
+  const note = status === "done" ? "Selesai" : isFailed ? (reason ? `Gagal: ${reason}` : "Gagal") : (p ? (p.message || "") : "");
+  const barState = status === "done" ? "state-done" : isFailed ? "state-error" : "";
+  const noteClass = isFailed ? "mini-progress-note fail-reason" : "mini-progress-note";
+  return `
+    <div class="mini-progress-top">${statusBadge(status)}<span>${percent}%</span></div>
+    <div class="mini-progress-track"><div class="mini-progress-bar ${barState}" style="width:${percent}%"></div></div>
+    <div class="${noteClass}">${note}</div>`;
+}
+
+// --- Sel kolom Action: tombol berubah sesuai status. Selama isRunLocked() aktif,
+// semua tombol run/rerun/lihat DIKUNCI kecuali milik record yang sedang berjalan. ---
+function actionCellHtml(recordNo) {
+  const status = batchStatus[recordNo] || "pending";
+  if (status === "queued" || status === "processing") {
+    return `<button class="btn-sm" disabled>Diproses…</button>`;
+  }
+  const locked = isRunLocked();
+  const lockAttr = locked ? "disabled" : "";
+  if (status === "done") {
+    // "Lihat" HARUS tetap bisa dipakai walau proses lain sedang berjalan -- hanya
+    // tombol yang MEMICU proses baru (run/rerun) yang dikunci lewat lockAttr.
+    return `<button class="btn-sm btn-check" data-action="check" data-record="${recordNo}">Lihat</button>`
+         + `<button class="btn-sm btn-rerun" data-action="run" data-record="${recordNo}" ${lockAttr}>Run Ulang</button>`;
+  }
+  if (status === "error" || status === "no_document") {
+    return `<button class="btn-sm btn-rerun" data-action="run" data-record="${recordNo}" ${lockAttr}>Ulangi</button>`;
+  }
+  return `<button class="btn-sm btn-run" data-action="run" data-record="${recordNo}" ${lockAttr}>Run</button>`;
+}
+
+function docLinkHtml(value) {
+  if (!value) return "-";
+  const isUrl = /^https?:\/\//i.test(String(value));
+  return isUrl ? `<a class="doc-link" href="${value}" target="_blank" rel="noopener">Lihat Dokumen</a>` : value;
+}
+
+// --- Filter (search) + windowing (tail) + pagination ---
+function getFilteredRecords() {
+  if (!searchQuery) return currentRecords;
+  const q = searchQuery.toLowerCase();
+  return currentRecords.filter((r) => (
+    String(r.Record).toLowerCase().includes(q)
+    || DATA_COLUMNS.some((c) => String(r[c] ?? "").toLowerCase().includes(q))
+  ));
+}
+function getWindowedRecords() {
+  const filtered = getFilteredRecords();
+  return tailSize >= filtered.length ? filtered : filtered.slice(-tailSize);
+}
+function getPageRecords() {
+  const windowed = getWindowedRecords();
+  const start = (currentPage - 1) * pageSize;
+  return windowed.slice(start, start + pageSize);
+}
+function totalPages() {
+  return Math.max(1, Math.ceil(getWindowedRecords().length / pageSize));
+}
+
+sheetSearchInput.addEventListener("input", () => {
+  searchQuery = sheetSearchInput.value.trim();
+  currentPage = 1;
+  renderSheetTable();
+});
+
+pageSizeSelect.addEventListener("change", () => {
+  pageSize = parseInt(pageSizeSelect.value, 10) || 25;
+  currentPage = 1;
+  renderSheetTable();
+});
+
+function renderSheetTable() {
+  if (currentRecords.length === 0) {
+    sheetTableSection.style.display = "none";
+    return;
+  }
+  if (currentPage > totalPages()) currentPage = totalPages();
+
+  const locked = isRunLocked();
+  sheetTableHead.innerHTML = `<th><input type="checkbox" id="checkAllBox" ${locked ? "disabled" : ""}></th><th>No</th>`
+    + DATA_COLUMNS.map((c) => `<th>${c}</th>`).join("")
+    + `<th class="cell-status">Status</th><th>Action</th><th>Final Status</th>`;
+
+  sheetTableBody.innerHTML = "";
+  getPageRecords().forEach((record) => {
+    const no = record.Record;
+    const status = batchStatus[no] || "pending";
+    // Sudah pernah dijalankan (bukan pending) -> tidak bisa dicentang lagi utk bulk run.
+    const checkDisabled = locked || status !== "pending";
+    const tr = document.createElement("tr");
+    tr.className = "record-row";
+    tr.dataset.recordNo = no;
+    const dataCells = DATA_COLUMNS.map((c) => {
+      const v = record[c] ?? "-";
+      return c === "Surat Pernyataan" ? `<td>${docLinkHtml(v)}</td>` : `<td>${v}</td>`;
+    }).join("");
+    tr.innerHTML = `
+      <td><input type="checkbox" class="row-check" data-record="${no}" ${checkedRecords.has(String(no)) ? "checked" : ""} ${checkDisabled ? "disabled" : ""}></td>
+      <td>${no}</td>
+      ${dataCells}
+      <td class="status-cell cell-status">${statusCellHtml(no)}</td>
+      <td class="action-cell">${actionCellHtml(no)}</td>
+      <td class="final-status-cell">${hasilAkhirBadgeHtml(resolveHasilAkhir(batchFinalStatus[no], batchDecision[no]))}</td>`;
+    sheetTableBody.appendChild(tr);
+  });
+
+  sheetTableSection.style.display = "block";
+  renderTailInfo();
+  renderPagination();
+  updateCheckedCount();
+  applyToolbarLock();
+  // Final Status yang masih generic diperkaya dari hasil tersimpan, tanpa OCR ulang.
+  setTimeout(() => {
+    getPageRecords().forEach((r) => {
+      const no = String(r.Record);
+      if ((batchStatus[no] || batchStatus[r.Record]) === "done" && !batchDecision[no]) hydrateFinalStatusForRecord(no);
+    });
+  }, 0);
+}
+
+// Kunci tombol pemicu run lain (bulk & index/range) selama isRunLocked() aktif,
+// supaya proses manual per-record yang sedang berjalan tidak ikut terpengaruh.
+function applyToolbarLock() {
+  const locked = isRunLocked();
+  sheetBulkRunBtn.disabled = locked || checkedRecords.size === 0;
+  sheetSubmitBtn.disabled = locked;
+  sheetSelectorInput.disabled = locked;
+}
+
+function renderTailInfo() {
+  const filteredLen = getFilteredRecords().length;
+  const windowedLen = getWindowedRecords().length;
+  const searchNote = searchQuery ? ` (hasil pencarian dari ${currentRecords.length} record)` : "";
+  tailInfo.textContent = `Menampilkan ${windowedLen} dari ${filteredLen} record${searchNote}, ${pageSize}/halaman.`;
+  tailMoreBtn.style.display = (windowedLen >= filteredLen || searchQuery) ? "none" : "inline-block";
+}
+
+tailMoreBtn.addEventListener("click", () => {
+  tailSize += TAIL_STEP;
+  currentPage = 1;
+  renderSheetTable();
+});
+
+function renderPagination() {
+  const pages = totalPages();
+  paginationRow.innerHTML = `
+    <button id="prevPageBtn" ${currentPage <= 1 ? "disabled" : ""}>&laquo; Sebelumnya</button>
+    <span>Halaman ${currentPage} / ${pages}</span>
+    <button id="nextPageBtn" ${currentPage >= pages ? "disabled" : ""}>Berikutnya &raquo;</button>`;
+  document.getElementById("prevPageBtn").addEventListener("click", () => { currentPage--; renderSheetTable(); });
+  document.getElementById("nextPageBtn").addEventListener("click", () => { currentPage++; renderSheetTable(); });
+}
+
+function updateCheckedCount() {
+  checkedCountEl.textContent = checkedRecords.size;
+  syncCheckAllBoxState();
+  applyToolbarLock();
+}
+
+// Sinkronkan checked/unchecked/indeterminate checkbox "Select All" dengan
+// state checkedRecords utk HALAMAN YANG SEDANG TAMPIL saja (Select All =
+// per halaman; hanya aksi UNCHECK yang sengaja global lintas halaman, lihat
+// listener "checkAllBox" di atas). Dipanggil setiap kali tabel/checkbox
+// berubah supaya state selalu konsisten saat pagination/filter berubah.
+function syncCheckAllBoxState() {
+  const checkAllBox = document.getElementById("checkAllBox");
+  if (!checkAllBox) return;
+  const locked = isRunLocked();
+  const pagePending = getPageRecords().filter((r) => (batchStatus[r.Record] || "pending") === "pending");
+  const checkedOnPage = pagePending.filter((r) => checkedRecords.has(String(r.Record)));
+  checkAllBox.disabled = locked || pagePending.length === 0;
+  if (pagePending.length === 0 || checkedOnPage.length === 0) {
+    checkAllBox.checked = false;
+    checkAllBox.indeterminate = false;
+  } else if (checkedOnPage.length === pagePending.length) {
+    checkAllBox.checked = true;
+    checkAllBox.indeterminate = false;
+  } else {
+    checkAllBox.checked = false;
+    checkAllBox.indeterminate = true;
+  }
+}
+
+// --- Delegasi klik: checkbox baris, checkbox "semua", tombol action ---
+sheetTableBody.addEventListener("change", (e) => {
+  if (e.target.classList.contains("row-check")) {
+    const no = e.target.dataset.record;
+    if (e.target.checked) checkedRecords.add(no); else checkedRecords.delete(no);
+    updateCheckedCount();
+  }
+});
+sheetTableHead.addEventListener("change", (e) => {
+  if (e.target.id === "checkAllBox") {
+    if (e.target.checked) {
+      // Select All hanya memilih record yang masih "pending" (halaman ini).
+      getPageRecords().forEach((r) => {
+        if ((batchStatus[r.Record] || "pending") === "pending") {
+          checkedRecords.add(String(r.Record));
+        }
+      });
+    } else {
+      // Uncheck Select All -> hapus SEMUA pilihan, termasuk record di halaman lain.
+      checkedRecords.clear();
+    }
+    renderSheetTable();
+  }
+});
+sheetTableBody.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn) return;
+  const recordNo = btn.dataset.record;
+  if (btn.dataset.action === "check") {
+    const record = currentRecords.find((r) => String(r.Record) === String(recordNo));
+    if (record) fetchSheetResult(record);
+  } else {
+    runRecords([recordNo]);   // Run per baris, atau Run Ulang/Ulangi
+  }
+});
+
+// Jalankan record yang dicentang (bulk run)
+sheetBulkRunBtn.addEventListener("click", () => {
+  if (checkedRecords.size === 0) { sheetMessage.textContent = "Centang minimal 1 record terlebih dahulu."; return; }
+  runRecords([...checkedRecords]);
+});
+
+// Jalankan berdasarkan index/range yang diketik
+sheetSubmitBtn.addEventListener("click", () => {
+  if (!currentSessionId) { sheetMessage.textContent = "Muat data Excel/Google Spreadsheet terlebih dahulu."; return; }
+  runRecords(null, sheetSelectorInput.value.trim());   // selector mentah, biar server yang parse "1,3,5-8"
+});
+
+// Satu fungsi submit untuk ketiga cara (per-baris/bulk/index-range) -- semuanya lewat /api/sheet/submit.
+async function runRecords(recordNos, rawSelector) {
+  if (!currentSessionId) { sheetMessage.textContent = "Muat data Excel/Google Spreadsheet terlebih dahulu."; return; }
+  const selector = rawSelector !== undefined ? rawSelector : (recordNos || []).join(",");
+  try {
+    const res = await fetch(`/api/sheet/submit/${currentSessionId}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selector }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      sheetMessage.innerHTML = `<div class="error-box">${data.error || "Gagal memulai proses"}</div>`;
+      return;
+    }
+    data.queued.forEach((no) => {
+      batchStatus[no] = "queued";
+      delete batchFinalStatus[no];   // reset status/keputusan lama (mis. rerun stlh TOLAK)
+      delete batchDecision[no];
+      delete batchProgress[no];      // reset progress lama supaya tidak "nyangkut" di persen sebelumnya
+      delete batchErrors[no];
+      checkedRecords.delete(String(no));
+      try { localStorage.removeItem(lsResultKey(currentSessionId, no)); } catch (_) { /* abaikan */ }
+    });
+    activeRunNos = new Set(data.queued.map(String));
+    renderSheetTable();
+    sheetBatchSummary.textContent = `Memproses ${data.total} record di background...`;
+    startBatchPolling();
+  } catch (err) {
+    sheetMessage.innerHTML = `<div class="error-box">Gagal menghubungi server: ${err}</div>`;
+  }
+}
+
+function updateStatusCells() {
+  const locked = isRunLocked();
+  document.querySelectorAll("#sheetTableBody tr").forEach((tr) => {
+    const no = tr.dataset.recordNo;
+    const status = batchStatus[no] || "pending";
+    const statusCell = tr.querySelector(".status-cell");
+    if (statusCell) statusCell.innerHTML = statusCellHtml(no);
+    const actionCell = tr.querySelector(".action-cell");
+    if (actionCell) actionCell.innerHTML = actionCellHtml(no);
+    const finalCell = tr.querySelector(".final-status-cell");
+    if (finalCell) finalCell.innerHTML = hasilAkhirBadgeHtml(resolveHasilAkhir(batchFinalStatus[no], batchDecision[no]));
+    const checkbox = tr.querySelector(".row-check");
+    if (checkbox) checkbox.disabled = locked || status !== "pending";
+  });
+  syncCheckAllBoxState();
+  applyToolbarLock();
+}
+
+function startBatchPolling() {
+  stopBatchPolling();
+  async function tick() {
+    try {
+      const res = await fetch(`/api/sheet/batch-status/${currentSessionId}`, { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        batchStatus = { ...batchStatus, ...data.status };
+        batchProgress = { ...batchProgress, ...(data.progress || {}) };
+        batchFinalStatus = { ...batchFinalStatus, ...(data.final_status || {}) };
+        // decision_v9_2 per record: belum dikirim batch-status API saat ini (lihat
+        // HANDOVER_V10.md poin 4) -- merge defensif, no-op kalau backend belum ada,
+        // otomatis aktif kalau backend ditambah tanpa perlu ubah frontend lagi.
+        batchDecision = { ...batchDecision, ...(data.decision_v9_2 || data.decision || {}) };
+        batchErrors = { ...batchErrors, ...(data.errors || {}) };
+        updateStatusCells();
+        saveSessionToLocalStorage();
+        hydrateDoneFinalStatuses(data.status);
+        sheetBatchSummary.textContent = `${data.done_count}/${data.total} record selesai diproses.`;
+        const stillRunning = Object.values(data.status).some((s) => s === "queued" || s === "processing");
+        if (!stillRunning) { batchTimer = null; return; }
+      }
+    } catch (_) { /* biarkan retry di tick berikutnya */ }
+    batchTimer = setTimeout(tick, 800);
+  }
+  tick();
+}
+
+function stopBatchPolling() {
+  if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
+}
+
+async function fetchSheetResult(record) {
+  sheetDetail.style.display = "block";
+  sheetDetailTitle.textContent = `Detail Record ${record.Record} — ${record["Nama Nasabah"] || ""}`;
+  if (sheetDetailFinalStatus) sheetDetailFinalStatus.innerHTML = "";
+  sheetDetailMessage.textContent = "Memuat hasil...";
+  if (sheetFieldSummary) {
+    sheetFieldSummary.className = "field-summary-box field-summary-neutral";
+    sheetFieldSummary.textContent = "Memuat summary pemeriksaan...";
+  }
+  sheetJsonDetails.style.display = "none";
+  sheetRoiSection.style.display = "none";
+  sheetProgress.stop();
+  document.getElementById("sheetProgressSection").style.display = "none";  // fetch hasil jadi -> tidak perlu progress bar OCR
+  loadTemplatePreview(sheetTemplateBox);
+  sheetDetail.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  // Coba dari localStorage dulu (lebih cepat, tidak bergantung sesi server).
+  const cacheKey = lsResultKey(currentSessionId, record.Record);
+  try {
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) {
+      renderSheetDetail(JSON.parse(cached));
+      sheetDetailMessage.textContent = "Hasil dimuat dari penyimpanan lokal.";
+      return;
+    }
+  } catch (_) { /* lanjut fetch ke server kalau cache tidak valid */ }
+
+  try {
+    const res = await fetch(`/api/sheet/result/${currentSessionId}/${record.Record}`);
+    const data = await res.json();
+    if (!res.ok) {
+      sheetDetailMessage.innerHTML = `<div class="error-box">${data.error || "Hasil belum tersedia"}\n${data.detail || ""}</div>`;
+      showLoadingRow(sheetResultBody, 4, "-");
+      return;
+    }
+    try { localStorage.setItem(cacheKey, JSON.stringify(data)); } catch (_) { /* penyimpanan penuh -> abaikan */ }
+    renderSheetDetail(data);
+    sheetDetailMessage.textContent = "Selesai (hasil sudah tersimpan, tidak diproses ulang).";
+  } catch (err) {
+    sheetDetailMessage.innerHTML = `<div class="error-box">Gagal menghubungi server: ${err}</div>`;
+  }
+}
+
+function renderSheetDetail(data) {
+  sheetUploadedBox.innerHTML = `<img src="${data.preview_url}" alt="dokumen">`;
+  renderFieldsTable(sheetResultBody, data.fields, true);
+  if (sheetDetailFinalStatus) {
+    sheetDetailFinalStatus.innerHTML = hasilAkhirBadgeHtml(
+      resolveHasilAkhir(data.final_status, data.decision_v9_2)
+    );
+  }
+  renderFieldSummary(sheetFieldSummary, data.fields);
+  // Simpan juga ke batchDecision supaya kolom Final Status di tabel list ikut
+  // konsisten kalau user kembali ke Tab 2 tanpa reload (decision baru saja
+  // diambil lewat fetch hasil, bukan lewat batch-status polling).
+  const recordNoForDecision = data.record && data.record.Record;
+  if (data.decision_v9_2 && recordNoForDecision !== undefined) {
+    batchDecision[recordNoForDecision] = data.decision_v9_2;
+    saveSessionToLocalStorage();
+    updateStatusCells();
+  }
+  sheetJsonOutput.textContent = JSON.stringify(data.raw_json, null, 2);
+  sheetJsonDetails.style.display = "block";
+  if (data.roi_template_url && data.roi_document_url) {
+    sheetRoiTemplateBox.innerHTML = `<img src="${data.roi_template_url}" alt="roi template">`;
+    sheetRoiDocumentBox.innerHTML = `<img src="${data.roi_document_url}" alt="roi document">`;
+    sheetRoiSection.style.display = "block";
+  }
+}
+</script>
+
+</body>
+</html>
