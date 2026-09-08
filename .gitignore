@@ -5,6 +5,12 @@
 *.onnx
 
 .venv/
+assets/ocr_*
+ver/
+outputs/
+uploads/
+downloaded_documents/
+stage_evaluation_debug_baseline/*
 models/
 weights/
 checkpoints/

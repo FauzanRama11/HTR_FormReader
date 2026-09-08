@@ -29,6 +29,11 @@ SPREADSHEET_COLUMNS = [
     # SPREADSHEET_COLUMNS if c in df.columns]`), tidak memengaruhi record
     # produksi yang sudah ada.
     "Status Verifikasi Form Pendaftaran Nasabah",
+    # V11: kolom mode wilayah urban/rural (lihat comparison.py
+    # _wilayah_mode/compute_decision). OPSIONAL sama seperti kolom di atas --
+    # kalau tidak ada di sumber data, semua record diperlakukan 'rural'
+    # (default aman sesuai spesifikasi: "selain urban -> anggap rural").
+    "Urban",
 ]
 
 MISSING_VALUES = {"", "none", "nan", "null", "n/a", "na", "-", "--"}
@@ -65,7 +70,19 @@ def _find_existing_index_column(df):
     return None
 
 
+def _canonicalize_urban_column(df):
+    """Kolom mode wilayah dicari CASE-INSENSITIVE (mis. 'urban'/'Urban'/
+    'URBAN') lalu di-rename ke kanonik 'Urban' -- supaya cocok dgn
+    SPREADSHEET_COLUMNS tanpa bergantung pada capitalization header asli
+    file sumber. Kolom lain TIDAK disentuh."""
+    for c in df.columns:
+        if str(c).strip().lower() == "urban" and c != "Urban":
+            return df.rename(columns={c: "Urban"})
+    return df
+
+
 def _clean_dataframe(df):
+    df = _canonicalize_urban_column(df)
     index_col = _find_existing_index_column(df)
     index_values = None
     if index_col is not None:

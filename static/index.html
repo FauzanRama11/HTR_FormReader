@@ -121,6 +121,103 @@
   .pagination-row button { padding: 5px 12px; font-size: 12px; }
   a.doc-link { color: #2563eb; text-decoration: underline; font-size: 12px; }
 
+  /* Card utama 3 section: Introduction/Rules, Table Controls, Main Table */
+  .card-main { border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; overflow: hidden; }
+  .card-section { padding: 14px 16px; border-bottom: 1px solid #eef0f3; }
+  .card-section:last-child { border-bottom: none; }
+  .card-section-title { margin: 0 0 6px; font-size: 12px; font-weight: 700; color: #374151; text-transform: uppercase; letter-spacing: .03em; }
+  .card-intro-desc { font-size: 13px; color: #4b5563; margin: 0 0 10px; }
+  .card-intro-stats { display: flex; gap: 8px 16px; flex-wrap: wrap; font-size: 13px; color: #1f2937; margin-bottom: 10px; }
+  .card-intro-stats b { font-weight: 700; }
+  .card-intro-rules { display: flex; flex-wrap: wrap; gap: 5px 18px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: #4b5563; }
+  .card-intro-rules li b { color: #1f2937; }
+  .card-footer-info { font-size: 12px; color: #4b5563; text-align: center; margin-top: 10px; }
+
+
+  /* V12 — hierarchy: Summary and Overview + Record Table */
+  .sheet-workspace { display: grid; gap: 18px; }
+  .workspace-block {
+    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, .06); overflow: hidden;
+  }
+  .workspace-heading {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 16px 18px 12px; border-bottom: 1px solid #eef2f7;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  }
+  .workspace-heading h3 { margin: 0; font-size: 16px; color: #0f172a; letter-spacing: -.01em; }
+  .workspace-heading::before {
+    content: ""; width: 4px; height: 22px; border-radius: 999px; background: #2563eb;
+    flex: 0 0 auto;
+  }
+  .workspace-heading h3 { flex: 1; }
+  .overview-content { padding: 16px 18px 18px; }
+  .overview-stats {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
+    margin-bottom: 14px;
+  }
+  .overview-stat {
+    position: relative; padding: 14px 16px; border: 1px solid #dbeafe;
+    border-radius: 12px; background: linear-gradient(135deg, #f8fbff 0%, #eff6ff 100%);
+    min-height: 54px;
+  }
+  .overview-stat-label {
+    display: block; font-size: 11px; color: #64748b; text-transform: uppercase;
+    letter-spacing: .06em; font-weight: 700; margin-bottom: 5px;
+  }
+  .overview-stat-value { display: block; color: #0f172a; font-size: 14px; font-weight: 700; line-height: 1.35; }
+  .overview-rules {
+    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px;
+  }
+  .overview-rule {
+    border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px 11px;
+    background: #fff; color: #475569; font-size: 11.5px; line-height: 1.4;
+  }
+  .overview-rule strong { display: block; color: #1e293b; margin-bottom: 2px; font-size: 12px; }
+  .record-content { padding: 14px 16px 16px; }
+  .record-toolbar {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    margin-bottom: 12px; padding: 11px; background: #f8fafc;
+    border: 1px solid #e2e8f0; border-radius: 11px;
+  }
+  .record-toolbar .toolbar-group { padding-right: 4px; }
+  .record-toolbar input[type=text], .record-toolbar select {
+    background: #fff; border-color: #cbd5e1;
+  }
+  .record-toolbar button { box-shadow: 0 1px 2px rgba(15, 23, 42, .08); }
+  #sheetTable th {
+    background: #f1f5f9; color: #334155; font-size: 11.5px; text-transform: none;
+    letter-spacing: .01em; padding-top: 9px; padding-bottom: 9px;
+  }
+  #sheetTable td { padding-top: 9px; padding-bottom: 9px; }
+  #sheetTable tbody tr { transition: background .15s ease, box-shadow .15s ease; }
+  #sheetTable tbody tr:hover { background: #f8fbff; box-shadow: inset 3px 0 0 #93c5fd; }
+  .notes-cell { min-width: 190px; max-width: 300px; }
+  .notes-wrap { display: flex; flex-wrap: wrap; gap: 5px; align-items: flex-start; }
+  /* .note-badge { */
+    /* appearance: none; border: 1px solid #d1d5db; border-radius: 999px;
+    padding: 4px 8px; font-size: 10.5px; line-height: 1.2; font-weight: 700;
+    white-space: nowrap; cursor: default;
+  }
+  .note-badge:disabled { opacity: 1; cursor: default; }
+  .note-roi { background: #fff7ed; border-color: #fdba74; color: #9a3412; }
+  .note-ocr { background: #fefce8; border-color: #fde047; color: #854d0e; }
+  .note-fallback { background: #eef2ff; border-color: #a5b4fc; color: #4338ca; }
+  .note-tenor { background: #fff1f2; border-color: #fda4af; color: #9f1239; }
+  .note-reward { background: #fdf2f8; border-color: #f9a8d4; color: #9d174d; }
+  .note-default { background: #f8fafc; border-color: #cbd5e1; color: #475569; } */
+
+  @media (max-width: 980px) {
+    .overview-rules { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 640px) {
+    body { margin-top: 16px; }
+    .overview-stats { grid-template-columns: 1fr; }
+    .overview-rules { grid-template-columns: 1fr; }
+    .workspace-heading { padding: 14px; }
+    .overview-content, .record-content { padding: 12px; }
+  }
+
   .progress-section {
     display: none; border: 1px solid #d1d5db; border-radius: 8px; padding: 14px;
     margin: 12px 0 24px; background: #f9fafb;
@@ -137,6 +234,105 @@
 
   #message, #sheetMessage { margin: 10px 0; font-size: 14px; }
   .error-box { color: #dc2626; white-space: pre-wrap; font-size: 12px; }
+
+  
+  .note-badge {
+    appearance: none;
+    border-radius: 999px;
+    padding: 3px 7px;
+    font-size: 9.5px;
+    line-height: 1.25;
+    font-weight: 650;
+    white-space: nowrap;
+    cursor: default;
+    box-shadow: none;
+  }
+
+  .note-badge:disabled {
+    opacity: 1;
+    cursor: default;
+  }
+
+  .note-roi {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    color: #c2410c;
+  }
+
+  .note-ocr {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #a16207;
+  }
+
+  .note-fallback {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #1d4ed8;
+  }
+
+  .note-tenor {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+  }
+
+  .note-reward {
+    background: #fdf4ff;
+    border: 1px solid #f5d0fe;
+    color: #a21caf;
+  }
+
+  .note-default {
+    background: #f8fafc;
+    border: 1px solid #dbe4ee;
+    color: #475569;
+  }
+
+  
+  /* FIX: global button:disabled sebelumnya menimpa warna Notes menjadi gelap */
+  button.note-badge:disabled {
+    opacity: 1;
+    cursor: default;
+    box-shadow: none;
+  }
+
+  button.note-badge.note-roi:disabled {
+    background: #fff7ed;
+    border-color: #fed7aa;
+    color: #c2410c;
+  }
+
+  button.note-badge.note-ocr:disabled {
+    background: #fffbeb;
+    border-color: #fde68a;
+    color: #a16207;
+  }
+
+  button.note-badge.note-fallback:disabled {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1d4ed8;
+  }
+
+  button.note-badge.note-tenor:disabled {
+    background: #fef2f2;
+    border-color: #fecaca;
+    color: #b91c1c;
+  }
+
+  button.note-badge.note-reward:disabled {
+    background: #fdf4ff;
+    border-color: #f5d0fe;
+    color: #a21caf;
+  }
+
+  button.note-badge.note-default:disabled {
+    background: #f8fafc;
+    border-color: #dbe4ee;
+    color: #475569;
+  }
+
 
   details { margin-top: 8px; }
   summary { cursor: pointer; font-weight: bold; margin-bottom: 8px; }
@@ -220,47 +416,78 @@
   </div>
   <div id="sheetMessage"></div>
 
-  <div class="table-section" id="sheetTableSection" style="display:none;">
-    <h3>Daftar Record</h3>
+  <div id="sheetTableSection" style="display:none;">
+    <div class="sheet-workspace">
 
-    <div class="toolbar">
-      <div class="toolbar-group">
-        <input type="text" id="sheetSearchInput" class="search-input" placeholder="Cari di tabel (nama, rekening, dll)...">
-      </div>
-      <div class="toolbar-group">
-        <input type="text" id="sheetSelectorInput" placeholder="Index/Range, mis. 1,3,5-8 (kosong = semua)">
-        <button id="sheetSubmitBtn" class="btn-sm">Jalankan Index/Range</button>
-      </div>
-      <div class="toolbar-group">
-        <span class="tail-info"><span id="checkedCount">0</span> dicentang</span>
-        <button id="sheetBulkRunBtn" class="btn-sm">Jalankan yang Dicentang</button>
-      </div>
+      <section class="workspace-block" aria-labelledby="summaryOverviewHeading">
+        <div class="workspace-heading">
+          <h3 id="summaryOverviewHeading">Summary and Overview</h3>
+        </div>
+        <div class="overview-content">
+          <div class="overview-stats">
+            <div class="overview-stat">
+              <span class="overview-stat-label">Loaded Records</span>
+              <span class="overview-stat-value" id="sheetIntroCount">0 record dimuat</span>
+            </div>
+            <div class="overview-stat">
+              <span class="overview-stat-label">Processing Progress</span>
+              <span class="overview-stat-value" id="sheetBatchSummary">0/0 record selesai diproses</span>
+            </div>
+          </div>
+          <div class="overview-rules">
+            <div class="overview-rule"><strong>Run</strong>Proses satu record secara individual.</div>
+            <div class="overview-rule"><strong>Lihat</strong>Buka hasil record yang sudah tersimpan.</div>
+            <div class="overview-rule"><strong>Bulk Run</strong>Centang beberapa record lalu proses bersamaan.</div>
+            <div class="overview-rule"><strong>Index / Range</strong>Proses index tertentu, mis. 1,3,5-8.</div>
+            <div class="overview-rule"><strong>Export Excel</strong>Export hasil tersimpan tanpa OCR ulang.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace-block" aria-labelledby="recordTableHeading">
+        <div class="workspace-heading">
+          <h3 id="recordTableHeading">Record Table</h3>
+        </div>
+        <div class="record-content">
+          <div class="record-toolbar">
+            <div class="toolbar-group">
+              <input type="text" id="sheetSearchInput" class="search-input" placeholder="Cari nama, rekening, nominal, status...">
+            </div>
+            <div class="toolbar-group">
+              <input type="text" id="sheetSelectorInput" placeholder="Index/Range, mis. 1,3,5-8">
+              <button id="sheetSubmitBtn" class="btn-sm">Jalankan Index/Range</button>
+            </div>
+            <div class="toolbar-group">
+              <span class="tail-info"><span id="checkedCount">0</span> selected</span>
+              <button id="sheetBulkRunBtn" class="btn-sm">Jalankan yang Dicentang</button>
+            </div>
+            <div class="toolbar-group">
+              <button id="sheetExportBtn" class="btn-sm">Export Excel</button>
+            </div>
+            <div class="toolbar-group">
+              <label for="pageSizeSelect" style="font-size:12px;color:#4b5563;">Baris/halaman:</label>
+              <select id="pageSizeSelect">
+                <option value="5">5</option>
+                <option value="10">10</option>
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+              </select>
+              <button id="tailMoreBtn" class="btn-sm">Tampilkan 500 record lagi</button>
+            </div>
+          </div>
+
+          <div class="table-scroll">
+            <table id="sheetTable">
+              <thead><tr id="sheetTableHead"></tr></thead>
+              <tbody id="sheetTableBody"></tbody>
+            </table>
+          </div>
+          <p class="card-footer-info" id="tailInfo"></p>
+          <div class="pagination-row" id="paginationRow"></div>
+        </div>
+      </section>
+
     </div>
-    <div class="batch-summary" id="sheetBatchSummary"></div>
-    <p class="hint-text">Klik <b>Run</b> pada baris untuk memproses 1 record. Klik <b>Lihat</b> pada record yang sudah selesai untuk membuka hasil tersimpan.</p>
-
-    <div class="toolbar-row" style="justify-content:space-between;">
-      <span class="tail-info" id="tailInfo"></span>
-      <div class="toolbar-group">
-        <label for="pageSizeSelect" style="font-size:12px;color:#4b5563;">Baris/halaman:</label>
-        <select id="pageSizeSelect">
-          <option value="5">5</option>
-          <option value="10">10</option>
-          <option value="25" selected>25</option>
-          <option value="50">50</option>
-        </select>
-        <button id="tailMoreBtn" class="btn-sm">Tampilkan 500 record lagi</button>
-      </div>
-    </div>
-
-    <div class="table-scroll">
-      <table id="sheetTable">
-        <thead><tr id="sheetTableHead"></tr></thead>
-        <tbody id="sheetTableBody"></tbody>
-      </table>
-    </div>
-
-    <div class="pagination-row" id="paginationRow"></div>
   </div>
 
   <!-- Detail record: layout sama seperti Tab 1 -->
@@ -404,9 +631,14 @@ function renderFieldsTable(tbody, fields, withDataEntry) {
     const conf = (f.confidence !== null && f.confidence !== undefined) ? ` (conf: ${f.confidence.toFixed(2)})` : "";
     const dataEntry = withDataEntry ? (f.data_entry ?? "-") : "-";
     const displayStatus = withDataEntry ? (f.display_status || f.status || "-") : (f.status || "-");
-    // Alasan per field (mis. sumber inferensi tenor/reward, atau detail
-    // spreadsheet vs dokumen saat mismatch) -- ditampilkan sbg tooltip.
-    const reasonParts = [f.source ? `sumber: ${f.source}` : null, f.reason || null].filter(Boolean);
+    // Alasan per field (mis. sumber inferensi tenor/reward, jalur fallback
+    // V12 yg menghasilkan nilai final, atau detail spreadsheet vs dokumen
+    // saat mismatch) -- ditampilkan sbg tooltip.
+    const reasonParts = [
+      f.source ? `sumber: ${f.source}` : null,
+      f.notes || null,
+      f.reason || null,
+    ].filter(Boolean);
     const reasonAttr = reasonParts.length ? ` title="${reasonParts.join(" — ").replace(/"/g, "&quot;")}"` : "";
     const statusClass = reasonParts.length ? `status-${displayStatus} field-reason` : `status-${displayStatus}`;
     tr.innerHTML = `
@@ -541,10 +773,12 @@ const sheetTableBody = document.getElementById("sheetTableBody");
 const sheetSelectorInput = document.getElementById("sheetSelectorInput");
 const sheetSubmitBtn = document.getElementById("sheetSubmitBtn");
 const sheetBulkRunBtn = document.getElementById("sheetBulkRunBtn");
+const sheetExportBtn = document.getElementById("sheetExportBtn");
 const sheetSearchInput = document.getElementById("sheetSearchInput");
 const pageSizeSelect = document.getElementById("pageSizeSelect");
 const checkedCountEl = document.getElementById("checkedCount");
 const sheetBatchSummary = document.getElementById("sheetBatchSummary");
+const sheetIntroCount = document.getElementById("sheetIntroCount");
 const tailInfo = document.getElementById("tailInfo");
 const tailMoreBtn = document.getElementById("tailMoreBtn");
 const paginationRow = document.getElementById("paginationRow");
@@ -577,8 +811,16 @@ const lsResultKey = (id, no) => `htr_sheet_result_${id}_${no}`;
 
 // Kolom data yang ditampilkan di tabel Tab 2, sesuai spesifikasi.
 const DATA_COLUMNS = [
-  "Nomor Rekening", "Nama Nasabah", "Nominal Penempatan", "Tenor Hold", "Pilihan Hadiah", "Surat Pernyataan",
+  "Nama Nasabah", "Nomor Rekening", "Nominal Penempatan", "Urban", "Surat Pernyataan",
+  "Status Verifikasi Form Pendaftaran Nasabah",
 ];
+// Label header ringkas (data tetap dibaca dari key asli record di atas).
+const DATA_COLUMN_LABELS = {
+  "Nama Nasabah": "Nama",
+  "Nomor Rekening": "No. Rekening",
+  "Urban": "Urban/Rural",
+  "Status Verifikasi Form Pendaftaran Nasabah": "Status Verifikasi",
+};
 const TAIL_DEFAULT = 500;
 const TAIL_STEP = 500;
 
@@ -682,8 +924,8 @@ async function loadSheetRecords(fetchPromise) {
     currentRecords.forEach((r) => { batchStatus[r.Record] = "pending"; });
     renderSheetTable();
     saveSessionToLocalStorage();
-    sheetMessage.textContent = `${currentRecords.length} record dimuat (index dari sumber, tidak dibuat baru). `
-      + `Jalankan lewat tombol Run per baris, centang + "Jalankan yang Dicentang", atau isi index/range.`;
+    sheetIntroCount.textContent = `${currentRecords.length} record dimuat (index dari sumber, tidak dibuat baru)`;
+    sheetMessage.textContent = "";
   } catch (err) {
     sheetMessage.innerHTML = `<div class="error-box">Gagal menghubungi server: ${err}</div>`;
   }
@@ -829,6 +1071,83 @@ function hasilAkhirBadgeHtml(resolved) {
   if (resolved.reasons.length) debugParts.push(`detail: ${resolved.reasons.join(" | ")}`);
   const titleAttr = debugParts.length ? ` title="${debugParts.join(" | ").replace(/"/g, "&quot;")}"` : "";
   return `<span class="badge badge-${cls}"${titleAttr}>${resolved.headline}</span>`;
+}
+
+// Kolom "Notes" (V11): field non-decisive utk mode rural (Tenor/Bentuk
+// Reward) yang statusnya bukan OK -- TIDAK memengaruhi Final Status, hanya
+// keterangan tambahan. Kosong utk mode urban / kalau semuanya sesuai.
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function normalizeNoteLabel(note) {
+  const raw = String(note || "").trim();
+  const low = raw.toLowerCase();
+
+  if (!raw) return null;
+  if (low.includes("roi")) return "ROI Bermasalah";
+  if (low.includes("fallback")) return "Fallback OCR Digunakan";
+  if (low.includes("ocr") && (low.includes("yakin") || low.includes("confidence") || low.includes("rendah"))) {
+    return "OCR Kurang Yakin";
+  }
+  if (low.includes("tenor")) return "Tenor Tidak Sesuai";
+  if (low.includes("reward") || low.includes("bentuk reward")) return "Reward Tidak Sesuai";
+
+  return raw;
+}
+
+function noteBadgeClass(label) {
+  if (label === "ROI Bermasalah") return "note-roi";
+  if (label === "OCR Kurang Yakin") return "note-ocr";
+  if (label === "Fallback OCR Digunakan") return "note-fallback";
+  if (label === "Tenor Tidak Sesuai") return "note-tenor";
+  if (label === "Reward Tidak Sesuai") return "note-reward";
+  return "note-default";
+}
+
+function extractDecisionNotes(decision) {
+  if (!decision) return [];
+
+  const source = decision.notes;
+
+  if (Array.isArray(source)) {
+    return source;
+  }
+
+  if (typeof source === "string") {
+    return source
+      .split(/[;|]/)
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function notesCellHtml(decision) {
+  const notes = [
+    ...new Set(
+      extractDecisionNotes(decision)
+        .map(normalizeNoteLabel)
+        .filter(Boolean)
+    )
+  ];
+
+  if (!notes.length) return "-";
+
+  return `<div class="notes-wrap">${
+    notes.map((note) =>
+      `<button type="button"
+               class="note-badge ${noteBadgeClass(note)}"
+               disabled
+               title="${escapeHtml(note)}">${escapeHtml(note)}</button>`
+    ).join("")
+  }</div>`;
 }
 
 // Kotak "Hasil Akhir" besar, ditampilkan SEBELUM tabel detail per-field.
@@ -1057,12 +1376,22 @@ function renderSheetTable() {
     sheetTableSection.style.display = "none";
     return;
   }
+
+  // Summary and Overview selalu sinkron, termasuk saat sesi dipulihkan
+  // dari localStorage.
+  sheetIntroCount.textContent = `${currentRecords.length} record dimuat (index dari sumber)`;
+  const doneNow = Object.values(batchStatus).filter((s) => s === "done").length;
+  const runningNow = Object.values(batchStatus).some((s) => s === "queued" || s === "processing");
+  if (!runningNow) {
+    sheetBatchSummary.textContent = `${doneNow}/${currentRecords.length} record selesai diproses`;
+  }
+
   if (currentPage > totalPages()) currentPage = totalPages();
 
   const locked = isRunLocked();
-  sheetTableHead.innerHTML = `<th><input type="checkbox" id="checkAllBox" ${locked ? "disabled" : ""}></th><th>No</th>`
-    + DATA_COLUMNS.map((c) => `<th>${c}</th>`).join("")
-    + `<th class="cell-status">Status</th><th>Action</th><th>Final Status</th>`;
+  sheetTableHead.innerHTML = `<th><input type="checkbox" id="checkAllBox" ${locked ? "disabled" : ""}></th><th>Index</th>`
+    + DATA_COLUMNS.map((c) => `<th>${DATA_COLUMN_LABELS[c] || c}</th>`).join("")
+    + `<th class="cell-status">Status Proses</th><th>Action</th><th>Final Status</th><th>Notes</th>`;
 
   sheetTableBody.innerHTML = "";
   getPageRecords().forEach((record) => {
@@ -1074,8 +1403,13 @@ function renderSheetTable() {
     tr.className = "record-row";
     tr.dataset.recordNo = no;
     const dataCells = DATA_COLUMNS.map((c) => {
-      const v = record[c] ?? "-";
-      return c === "Surat Pernyataan" ? `<td>${docLinkHtml(v)}</td>` : `<td>${v}</td>`;
+      if (c === "Surat Pernyataan") return `<td>${docLinkHtml(record[c])}</td>`;
+      if (c === "Urban") {
+        const isUrban = String(record[c] || "").trim().toLowerCase() === "urban";
+        return `<td>${isUrban ? "Urban" : "Rural"}</td>`;
+      }
+      const v = record[c];
+      return `<td>${(v === undefined || v === null || v === "") ? "-" : v}</td>`;
     }).join("");
     tr.innerHTML = `
       <td><input type="checkbox" class="row-check" data-record="${no}" ${checkedRecords.has(String(no)) ? "checked" : ""} ${checkDisabled ? "disabled" : ""}></td>
@@ -1083,7 +1417,8 @@ function renderSheetTable() {
       ${dataCells}
       <td class="status-cell cell-status">${statusCellHtml(no)}</td>
       <td class="action-cell">${actionCellHtml(no)}</td>
-      <td class="final-status-cell">${hasilAkhirBadgeHtml(resolveHasilAkhir(batchFinalStatus[no], batchDecision[no]))}</td>`;
+      <td class="final-status-cell">${hasilAkhirBadgeHtml(resolveHasilAkhir(batchFinalStatus[no], batchDecision[no]))}</td>
+      <td class="notes-cell">${notesCellHtml(batchDecision[no])}</td>`;
     sheetTableBody.appendChild(tr);
   });
 
@@ -1212,6 +1547,31 @@ sheetSubmitBtn.addEventListener("click", () => {
   runRecords(null, sheetSelectorInput.value.trim());   // selector mentah, biar server yang parse "1,3,5-8"
 });
 
+// Export Excel: unduh tabel record (termasuk Final Status & Notes) dari hasil
+// yang SUDAH tersimpan di server -- TIDAK menjalankan OCR ulang.
+sheetExportBtn.addEventListener("click", async () => {
+  if (!currentSessionId) { sheetMessage.textContent = "Muat data Excel/Google Spreadsheet terlebih dahulu."; return; }
+  try {
+    const res = await fetch(`/api/sheet/export/${currentSessionId}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      sheetMessage.innerHTML = `<div class="error-box">${data.error || "Gagal mengekspor Excel"}</div>`;
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `VerifikasiOtomatis${currentSessionId}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    sheetMessage.innerHTML = `<div class="error-box">Gagal mengekspor Excel: ${err}</div>`;
+  }
+});
+
 // Satu fungsi submit untuk ketiga cara (per-baris/bulk/index-range) -- semuanya lewat /api/sheet/submit.
 async function runRecords(recordNos, rawSelector) {
   if (!currentSessionId) { sheetMessage.textContent = "Muat data Excel/Google Spreadsheet terlebih dahulu."; return; }
@@ -1254,6 +1614,8 @@ function updateStatusCells() {
     if (actionCell) actionCell.innerHTML = actionCellHtml(no);
     const finalCell = tr.querySelector(".final-status-cell");
     if (finalCell) finalCell.innerHTML = hasilAkhirBadgeHtml(resolveHasilAkhir(batchFinalStatus[no], batchDecision[no]));
+    const notesCell = tr.querySelector(".notes-cell");
+    if (notesCell) notesCell.innerHTML = notesCellHtml(batchDecision[no]);
     const checkbox = tr.querySelector(".row-check");
     if (checkbox) checkbox.disabled = locked || status !== "pending";
   });

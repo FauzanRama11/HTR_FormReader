@@ -182,6 +182,26 @@ def _resolve_field_boxes(template_gray, aligned_gray, shape, section_transforms)
         template_px, target_px, source, evidence = prep.resolve_roi_section(
             template_gray, aligned_gray, cfg, shape, section_transforms.get(region_name)
         )
+        # V14: kunci sisi atas/bawah ke batas field tetangga (lihat
+        # prep._clamp_field_box_y docstring) -- section transform berbasis
+        # translasi-saja (fallback <3 anchor) tidak bisa mengoreksi rotasi
+        # sisa, jadi row yg jauh dari anchor bisa drift ke row tetangga yg
+        # gap-nya NOL di template. Safety net ini SUDAH ADA di codebase tapi
+        # sebelumnya cuma dipakai utk tempat_tanggal_surat.
+        #
+        # SENGAJA DIBATASI ke identity_area saja (bukan semua region): dicoba
+        # universal dulu, tapi evaluasi 25-dokumen (evaluation_summary_
+        # roi_clamp_fix.json vs _fixed_v13.json) menunjukkan regresi nyata di
+        # placement_area (record 15/18, rentang_tenor benar->N/A) -- di sana
+        # PREV/NEXT_FIELD_*_NORM ikut dibangun dari box CHOICE_GROUPS
+        # (opsi tenor/reward) yang SECARA VERTIKAL TUMPANG TINDIH dgn baris
+        # teks di sekitarnya (bukan struktur 3-baris rapi spt identity_area),
+        # jadi batas tetangga yang dihitung bisa salah/kontradiktif di sana.
+        # identity_area TIDAK punya masalah itu (3 field teks murni, tanpa
+        # choice box yang overlap) -- root cause yang terverifikasi (lihat
+        # handover.md) memang spesifik di sini.
+        if region_name == "identity_area":
+            target_px = prep._clamp_field_box_y(target_px, field_name, shape)
         dx = target_px[0] - template_px[0]
         dy = target_px[1] - template_px[1]
         anchor_template_px = prep.norm_bbox_to_px(cfg["anchor_bbox"], shape)

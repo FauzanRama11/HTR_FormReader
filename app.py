@@ -33,6 +33,7 @@ import uuid
 from pathlib import Path
 
 import cv2
+import pandas as pd
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -94,6 +95,21 @@ def sanitize_error(exc):
     return f"Gagal memproses dokumen [{code}]" + (f": {cleaned}" if cleaned else "")
 
 
+def _decision_to_export_text(decision):
+    """Render decision_v9_2 (urban ATAU rural, lihat comparison.compute_decision)
+    jadi teks "Final Status"/"Notes" siap Excel -- format SAMA dgn contoh
+    pada spesifikasi ('OK Lanjut Proses' / 'Tolak – <alasan>'). Tidak
+    menjalankan OCR/decision baru, murni format ulang hasil yang SUDAH ada
+    di sesi (session['results'][no]['decision_v9_2'])."""
+    if not decision:
+        return "Belum Diproses", ""
+    notes_text = "; ".join(n for n in (decision.get("notes") or []) if n)
+    if str(decision.get("decision", "")).upper() == "OK":
+        return "OK Lanjut Proses", notes_text
+    reasons = "; ".join(r for r in (decision.get("reasons") or []) if r) or "Perlu verifikasi manual"
+    return f"Tolak – {reasons}", notes_text
+
+
 def _set_progress(request_id, **data):
     with _PROGRESS_LOCK:
         current = _PROGRESS.get(request_id, {})
@@ -149,9 +165,12 @@ def _run_ocr_and_format(request_id, document_path, data_entry_record=None):
     decision_v9_2 = None
     if data_entry_record:
         fields = comparison.attach_data_entry(fields, data_entry_record)
-        # V9.2 deterministic OK/TOLAK/REVIEW (5 decisive fields only, dual
-        # evidence for tenor/reward). Requires a reference record.
-        decision_v9_2 = comparison.compute_decision_v9_2(
+        # V9.2 deterministic OK/TOLAK/REVIEW (5 decisive fields, dual
+        # evidence for tenor/reward) utk mode urban, ATAU V11 rural (5 field
+        # beda: nama/nomor_rekening/nominal/TTD Nasabah/TTD BRI, tenor/reward
+        # jadi 'notes' non-decisive) -- dipilih otomatis dari kolom
+        # Urban/Rural di data_entry_record (lihat comparison.compute_decision).
+        decision_v9_2 = comparison.compute_decision(
             fields, result["raw_results"], result["choice_groups"], data_entry_record)
     # final_status: dipakai sbg fallback utk Tab 1 (upload manual tanpa
     # pembanding), tetap dihitung selalu.
@@ -413,4 +432,39 @@ def sheet_result(session_id: str, record_no: int):
     return JSONResponse(
         status_code=404,
         content={"error": f"Hasil belum tersedia (status: {status}).", "status": status, "detail": error},
+    )
+
+
+@app.get("/api/sheet/export/{session_id}")
+def export_sheet_excel(session_id: str):
+    """Export tabel record (kolom asli + Status Proses + Final Status +
+    Notes) ke .xlsx -- HANYA membaca hasil yang SUDAH tersimpan di sesi
+    (session['results']/['status']), TIDAK menjalankan OCR/decision ulang."""
+    session = _SESSIONS.get(session_id)
+    if session is None:
+        return JSONResponse(status_code=404, content={"error": "Sesi spreadsheet tidak ditemukan."})
+
+    rows = []
+    for record in session["records"]:
+        record_no = record["Record"]
+        result = session["results"].get(record_no)
+        decision = (result or {}).get("decision_v9_2")
+        final_status_text, notes_text = _decision_to_export_text(decision)
+        row = dict(record)
+        row["Status Proses"] = session["status"].get(record_no, "pending")
+        row["Final Status"] = final_status_text
+        row["Notes"] = notes_text
+        rows.append(row)
+
+    try:
+        df = pd.DataFrame(rows)
+        out_path = OUTPUT_DIR / f"export_{session_id}.xlsx"
+        df.to_excel(out_path, index=False)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": "Gagal membuat file Excel.", "detail": str(exc)})
+
+    return FileResponse(
+        out_path,
+        filename=f"hasil_verifikasi_{session_id}.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )

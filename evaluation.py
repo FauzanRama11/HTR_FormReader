@@ -39,6 +39,7 @@ Output:
 
 import argparse
 import csv
+import importlib
 import json
 import re
 import sys
@@ -167,9 +168,18 @@ def compare_field(field_name, extracted_value, ground_truth_value):
 def _extract_value(fields_table, raw_results, field_name):
     """Ambil nilai hasil ekstraksi utk satu field dari struktur return
     pipeline.run_pipeline(). Defensif thd beberapa bentuk umum skema
-    post.build_fields_table (dict-by-name ATAU list-of-dict) karena
-    postprocessing.py tidak termasuk file yang diberikan utk task ini --
-    evaluator tidak boleh berasumsi kaku pada skema yang tidak terlihat."""
+    post.build_fields_table (dict-by-name ATAU list-of-dict) supaya tetap
+    jalan lintas versi pipeline/postprocessing (mis. --pipeline pipeline1,
+    lihat compare_runs.py).
+
+    ROOT CAUSE FIX (V13): key asli yg dipakai post.build_fields_table
+    (postprocessing.py/postprocessing1.py, keduanya) adalah "ocr_result",
+    BUKAN "normalized_value"/"value"/"text"/"label"/"final_value" spt yang
+    ditebak versi sebelumnya -- akibatnya field ini SELALU None utk SEMUA
+    field & SEMUA record (measurable=0 di build_summary), bukan krn pipeline
+    gagal ekstrak, tapi krn evaluator salah baca skemanya sendiri. Key lama
+    dipertahankan sbg fallback (bukan dihapus) utk skema lain yg mungkin
+    tidak memakai "ocr_result"."""
     candidates = []
     if isinstance(fields_table, dict) and field_name in fields_table:
         candidates.append(fields_table[field_name])
@@ -182,7 +192,7 @@ def _extract_value(fields_table, raw_results, field_name):
 
     for c in candidates:
         if isinstance(c, dict):
-            for key in ("normalized_value", "value", "text", "label", "final_value"):
+            for key in ("ocr_result", "normalized_value", "value", "text", "label", "final_value"):
                 if c.get(key) not in (None, ""):
                     return c[key], c
             return None, c
@@ -246,7 +256,8 @@ def _save_debug(debug_dir, record, aligned_img, regions):
         pass  # debug image tidak boleh menggagalkan evaluasi
 
 
-def evaluate_record(record, template_img, template_path, debug_dir, debug_failed_only=True):
+def evaluate_record(record, template_img, template_path, debug_dir, debug_failed_only=True,
+                     pipeline_module=pipeline):
     result = _blank_result(record)
     t0 = time.time()
 
@@ -297,7 +308,7 @@ def evaluate_record(record, template_img, template_path, debug_dir, debug_failed
     # dipecah ulang di sini spy tidak menduplikasi pipeline.py). Kegagalan
     # dipetakan best-effort ke salah satu tahap resmi lewat pesan exception.
     try:
-        pipeline_result = pipeline.run_pipeline(doc_path, template_path=template_path)
+        pipeline_result = pipeline_module.run_pipeline(doc_path, template_path=template_path)
         result["pipeline_success"] = True
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
@@ -501,11 +512,24 @@ def main():
     parser.add_argument("--label", default="v9_2",
                          help="Suffix run (mis. v9_2_baseline / v9_2_optimized) -> nama file output berbeda per run, "
                               "supaya baseline vs optimized bisa dibandingkan tanpa evaluator kedua")
+    parser.add_argument("--pipeline", default="pipeline",
+                         help="Nama modul pipeline yg dipakai (mis. 'pipeline' [V12 saat ini] atau 'pipeline1' "
+                              "[V10/11] utk membandingkan versi/strategi model tanpa evaluator kedua -- lihat "
+                              "compare_runs.py utk menggabungkan hasil beberapa --label jadi satu laporan)")
+    parser.add_argument("--vlm-fallback", choices=["on", "off"], default=None,
+                         help="Override pipeline_module.VLM_FALLBACK_ENABLED (kalau modulnya punya atribut ini) "
+                              "-- mis. 'off' utk mengukur akurasi PaddleOCR SENDIRIAN vs 'on' dgn fallback VLM, "
+                              "dgn --pipeline yg sama")
     parser.add_argument("--output-csv", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
     args.output_csv = args.output_csv or str(BASE_DIR / f"evaluation_results_{args.label}.csv")
     args.output_json = args.output_json or str(BASE_DIR / f"evaluation_summary_{args.label}.json")
+
+    pipeline_module = importlib.import_module(args.pipeline) if args.pipeline != "pipeline" else pipeline
+    if args.vlm_fallback is not None and hasattr(pipeline_module, "VLM_FALLBACK_ENABLED"):
+        pipeline_module.VLM_FALLBACK_ENABLED = (args.vlm_fallback == "on")
+    vlm_fallback_enabled = getattr(pipeline_module, "VLM_FALLBACK_ENABLED", "N/A")
 
     template_path = args.template or prep.TEMPLATE_PATH
     template_img = prep.load_document(template_path)
@@ -522,7 +546,7 @@ def main():
               file=sys.stderr)
         try:
             res = evaluate_record(record, template_img, template_path, debug_dir,
-                                   debug_failed_only=not args.debug_all)
+                                   debug_failed_only=not args.debug_all, pipeline_module=pipeline_module)
         except Exception:
             res = _blank_result(record)
             res["failure_stage"] = "PIPELINE"
@@ -531,6 +555,9 @@ def main():
 
     write_csv(results, args.output_csv)
     summary = build_summary(results)
+    summary["run_label"] = args.label
+    summary["pipeline_module"] = args.pipeline
+    summary["vlm_fallback_enabled"] = vlm_fallback_enabled
     Path(args.output_json).write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"\nSaved: {args.output_csv}", file=sys.stderr)

@@ -6,6 +6,7 @@ OCR untuk field yang sama, lalu tandai match/mismatch.
 """
 
 import re
+from difflib import SequenceMatcher
 
 from postprocessing import derive_tenor_from_range
 
@@ -24,12 +25,43 @@ COLUMN_FIELD_MAP = {
 
 # Tipe data per field yang dibandingkan -> menentukan cara normalisasi.
 FIELD_DATA_TYPES = {
-    "nama_nasabah": "text",
+    "nama_nasabah": "name",   # V11: fuzzy (bukan exact) -- lihat is_field_match
     "nomor_rekening": "numeric",
     "nominal_penempatan": "currency",
     "tenor_penempatan": "tenor",
     "bentuk_reward": "choice",
 }
+
+# V11: threshold fuzzy khusus nama_nasabah (sementara, lihat HANDOVER_V11_NEXT.md
+# #2). Nomor rekening/nominal TETAP exact/deterministic (tidak lewat jalur ini).
+NAME_FUZZY_MATCH_THRESHOLD = 80
+
+
+def _name_similarity(a, b):
+    """Similarity dua string nama (0-100) yg SUDAH dinormalisasi (lowercase,
+    trim, collapse spasi -- lihat _normalize_for_compare). Pakai
+    difflib.SequenceMatcher stdlib supaya tidak menambah dependency baru."""
+    if not a or not b:
+        return 0.0
+    return round(SequenceMatcher(None, a, b).ratio() * 100, 1)
+
+
+def is_field_match(value_a, value_b, data_type):
+    """SATU-SATUNYA titik keputusan match/mismatch per tipe data -- dipakai
+    attach_data_entry (tabel/UI) & _validate_simple (decision backend) supaya
+    keduanya TIDAK PERNAH berbeda kesimpulan utk field yang sama (nama_nasabah
+    khususnya, lihat handover #2: "jangan sampai UI menunjukkan sesuai tetapi
+    decision backend masih TOLAK karena exact match lama").
+    Return (is_match: bool, similarity: float|None) -- similarity hanya
+    terisi utk data_type 'name' (disimpan utk audit)."""
+    norm_a = _normalize_for_compare(value_a, data_type)
+    norm_b = _normalize_for_compare(value_b, data_type)
+    if not norm_a or not norm_b:
+        return False, None
+    if data_type == "name":
+        similarity = _name_similarity(norm_a, norm_b)
+        return similarity >= NAME_FUZZY_MATCH_THRESHOLD, similarity
+    return norm_a == norm_b, None
 
 
 def _normalize_for_compare(value, data_type):
@@ -53,7 +85,7 @@ def _normalize_for_compare(value, data_type):
         t = re.sub(r"[^a-z]", "", text.lower())
         if t in ("nontunai", "barang", "nonkas", "noncash"):
             return "nontunai"
-        if t in ("tunai", "cash", "kas"):
+        if t in ("tunai", "cash",  "cashback",  "cash back", "kas"):
             return "tunai"
         return t
 
@@ -75,15 +107,19 @@ def attach_data_entry(fields_table, record):
         entry_value = record.get(column) if column else None
         ocr_value = row.get("ocr_result")
 
-        match = None
+        match, similarity = (None, None)
         if entry_value not in (None, "") and ocr_value not in (None, ""):
-            match = _normalize_for_compare(entry_value, data_type) == _normalize_for_compare(ocr_value, data_type)
+            match, similarity = is_field_match(entry_value, ocr_value, data_type)
 
         row["data_entry"] = entry_value
         row["match"] = match
+        if similarity is not None:
+            row["name_similarity"] = similarity  # audit trail (V11 fuzzy nama)
         row["display_status"] = _display_status(row.get("status"), match)
         if match is False:
             detail = f"data spreadsheet='{entry_value}' vs dokumen='{ocr_value}'"
+            if similarity is not None:
+                detail += f" (similarity {similarity:.0f}%)"
             row["reason"] = f"{row['reason']}; {detail}" if row.get("reason") else detail
         enriched.append(row)
     return enriched
@@ -173,8 +209,85 @@ DECISIVE_FIELDS_V9_2 = (
 
 # Signature checks are computed and returned for display, but per handover.md
 # ("other extracted fields/signatures are informational and must not affect
-# the business decision") they must NEVER drive OK/TOLAK/REVIEW.
+# the business decision") they must NEVER drive OK/TOLAK/REVIEW -- ini
+# berlaku utk mode URBAN. Utk mode RURAL (V11, lihat di bawah) signature
+# JUSTRU decisive, jadi jangan dianggap "selalu informational" secara global.
 INFORMATIONAL_FIELDS_V9_2 = ("signature_nasabah", "signature_atasan")
+
+# ============================================================================
+# V11 -- MODE WILAYAH (urban/rural), lihat spesifikasi:
+#   record[URBAN_RURAL_COLUMN] == "urban" (case-insensitive)              -> URBAN
+#   selain itu (kosong, "rural", nilai lain apa pun)                       -> RURAL
+# URBAN  : logic keputusan SAMA PERSIS spt sebelumnya (DECISIVE_FIELDS_V9_2,
+#          5 field: nama/nomor_rekening/nominal/tenor/reward).
+# RURAL  : Final Status HANYA ditentukan oleh RURAL_DECISIVE_FIELDS (5 field
+#          beda: nama/nomor_rekening/nominal/TTD Nasabah/TTD BRI). Tenor &
+#          Bentuk Reward TETAP dibaca+dibandingkan (evidence sama dgn urban)
+#          tapi TIDAK memengaruhi decision -- kalau bukan OK, masuk "notes".
+# ============================================================================
+URBAN_RURAL_COLUMN = "Urban"
+
+RURAL_DECISIVE_FIELDS = (
+    "nama_nasabah", "nomor_rekening", "nominal_penempatan",
+    "signature_nasabah", "signature_atasan",
+)
+
+# Field yang tetap dibaca/dibandingkan tapi non-decisive di mode RURAL ->
+# kalau TOLAK (mismatch pasti), badge tetap ini ditulis ke "notes", bukan
+# "reasons". Status REVIEW (ambigu/tidak yakin) tidak dapat badge sendiri --
+# sudah tercakup badge generik "OCR Kurang Yakin"/"ROI Bermasalah" di bawah,
+# sesuai daftar kategori Notes yang TETAP (lihat HANDOVER_V11_NEXT.md #4).
+RURAL_NOTE_FIELDS = {"tenor_penempatan": "Tenor Tidak Sesuai", "bentuk_reward": "Reward Tidak Sesuai"}
+
+# ============================================================================
+# V11 -- NOTES DIAGNOSTIC BADGES (#4). Kategori UI TETAP hanya 5 (di atas +
+# 2 di sini): "ROI Bermasalah", "OCR Kurang Yakin", "Fallback OCR Digunakan".
+# Detail teknis (TOO_WIDE/TOO_NARROW/WRONG_LOCATION/CUT_OFF/LABEL_BLEED, dll)
+# TETAP hanya di metadata/debug (fields_table/raw_results), TIDAK PERNAH
+# muncul mentah di Notes UI. Notes TIDAK PERNAH mengubah Final Status --
+# murni informasi tambahan, berlaku SAMA utk mode urban & rural.
+# ============================================================================
+# V12: source values sesuai pipeline.py -- "ocr_primary" TIDAK termasuk
+# (bukan fallback). "vlm_reference_check" = verifikasi mismatch vs referensi
+# (fitur terpisah, lihat pipeline._run_vlm_reference_check).
+FALLBACK_SOURCES = {"vlm_fullpage", "roi_template", "roi_second_pass_vlm", "vlm_reference_check"}
+
+
+def _is_roi_issue_row(row):
+    """'valid' (lihat postprocessing.build_text_field_result) True berarti
+    format value OK tapi confidence rendah -- BUKAN indikasi ROI salah.
+    'valid' False/None + status blank/review/not_detected -> value tidak
+    terbaca sama sekali secara benar, kemungkinan besar ROI meleset."""
+    status = row.get("status")
+    if status == "not_detected":
+        return True
+    return status == "review" and row.get("valid") is not True
+
+
+def _is_low_confidence_row(row):
+    return row.get("status") == "review" and row.get("valid") is True
+
+
+def _diagnostic_notes(fields_table):
+    """Notes generik dari status/confidence/source tiap field -- dipakai
+    BERSAMA oleh mode urban & rural (tidak seperti RURAL_NOTE_FIELDS yang
+    rural-only)."""
+    notes = []
+    if any(_is_roi_issue_row(row) for row in fields_table):
+        notes.append("ROI Bermasalah")
+    if any(_is_low_confidence_row(row) for row in fields_table):
+        notes.append("OCR Kurang Yakin")
+    if any(row.get("source") in FALLBACK_SOURCES for row in fields_table):
+        notes.append("Fallback OCR Digunakan")
+    return notes
+
+
+def _wilayah_mode(record):
+    """'urban' HANYA kalau record[URBAN_RURAL_COLUMN] PERSIS 'urban'
+    (case-insensitive, trim spasi) -- SELAIN itu (termasuk kosong/kolom
+    tidak ada) dianggap 'rural', sesuai spesifikasi."""
+    value = str((record or {}).get(URBAN_RURAL_COLUMN) or "").strip().lower()
+    return "urban" if value == "urban" else "rural"
 
 
 def _validate_simple(doc_value, ref_value, data_type, label, doc_status=None):
@@ -192,8 +305,12 @@ def _validate_simple(doc_value, ref_value, data_type, label, doc_status=None):
         return "REVIEW", f"{label} tidak terbaca dari dokumen"
     if not ref_n:
         return "REVIEW", f"{label} tidak ada data referensi"
-    if doc_n != ref_n:
-        return "TOLAK", f"{label} tidak sesuai: dokumen={doc_value}, referensi={ref_value}"
+    match, similarity = is_field_match(doc_value, ref_value, data_type)
+    if not match:
+        detail = f"{label} tidak sesuai: dokumen={doc_value}, referensi={ref_value}"
+        if similarity is not None:
+            detail += f" (similarity {similarity:.0f}%)"
+        return "TOLAK", detail
     return "OK", None
 
 
@@ -272,18 +389,19 @@ def validate_signature(name, sig_result):
     return "REVIEW", f"Tanda tangan {label} perlu verifikasi manual"
 
 
-def compute_decision_v9_2(fields_table, raw_results, choice_groups, record):
-    """7 validasi deterministik -> {"decision": OK/TOLAK/REVIEW, "reasons": [...],
-    "checks": {field: status}, "evidence": {...}}. Prioritas: ada TOLAK ->
-    TOLAK (semua alasan TOLAK dikumpulkan); tidak ada TOLAK tapi ada REVIEW
-    -> REVIEW; selain itu -> OK."""
+def _compute_all_checks(fields_table, raw_results, choice_groups, record):
+    """Hitung SEMUA 7 validasi (nama/nomor_rekening/nominal/tenor/reward +
+    2 signature) SATU KALI -- dipakai bersama oleh compute_decision_v9_2
+    (urban) dan compute_decision_rural (V11) supaya logic per-field validasi
+    TIDAK diduplikasi antar mode wilayah. Return (checks, evidence) -- bentuk
+    checks[field] = (status, reason) SAMA seperti sebelumnya."""
     reverse_map = {f: c for c, f in COLUMN_FIELD_MAP.items()}
     by_field = {row["field"]: row for row in fields_table}
 
     checks = {}
     checks["nama_nasabah"] = _validate_simple(
         by_field.get("nama_nasabah", {}).get("ocr_result"),
-        record.get(reverse_map["nama_nasabah"]), "text", "Nama Nasabah",
+        record.get(reverse_map["nama_nasabah"]), "name", "Nama Nasabah",
         doc_status=by_field.get("nama_nasabah", {}).get("status"))
     checks["nomor_rekening"] = _validate_simple(
         by_field.get("nomor_rekening", {}).get("ocr_result"),
@@ -305,20 +423,82 @@ def compute_decision_v9_2(fields_table, raw_results, choice_groups, record):
     checks["signature_nasabah"] = validate_signature("signature_nasabah", raw_results.get("signature_nasabah"))
     checks["signature_atasan"] = validate_signature("signature_atasan", raw_results.get("signature_atasan"))
 
-    decisive_checks = {k: v for k, v in checks.items() if k in DECISIVE_FIELDS_V9_2}
+    evidence = {"tenor_penempatan": tenor_evidence, "bentuk_reward": reward_evidence}
+    return checks, evidence
+
+
+def _decide_from_checks(checks, decisive_fields):
+    """Prioritas SAMA spt sebelumnya: ada TOLAK -> TOLAK (semua alasan TOLAK
+    dikumpulkan); tidak ada TOLAK tapi ada REVIEW -> REVIEW; selain itu ->
+    OK. HANYA field di 'decisive_fields' yang dihitung -- inilah satu-
+    satunya perbedaan antara mode urban & rural."""
+    decisive_checks = {k: v for k, v in checks.items() if k in decisive_fields}
     reasons_tolak = [r for s, r in decisive_checks.values() if s == "TOLAK" and r]
     reasons_review = [r for s, r in decisive_checks.values() if s == "REVIEW" and r]
-
     if reasons_tolak:
-        decision, reasons = "TOLAK", reasons_tolak
-    elif reasons_review:
-        decision, reasons = "REVIEW", reasons_review
-    else:
-        decision, reasons = "OK", []
+        return "TOLAK", reasons_tolak
+    if reasons_review:
+        return "REVIEW", reasons_review
+    return "OK", []
+
+
+def compute_decision_v9_2(fields_table, raw_results, choice_groups, record):
+    """Mode URBAN (TIDAK BERUBAH dari sebelumnya): 7 validasi deterministik
+    -> {"decision": OK/TOLAK/REVIEW, "reasons": [...], "checks":
+    {field: status}, "evidence": {...}}, decisive = DECISIVE_FIELDS_V9_2
+    (nama/nomor_rekening/nominal/tenor/reward)."""
+    checks, evidence = _compute_all_checks(fields_table, raw_results, choice_groups, record)
+    decision, reasons = _decide_from_checks(checks, DECISIVE_FIELDS_V9_2)
+    return {
+        "decision": decision,
+        "reasons": reasons,
+        "checks": {k: v[0] for k, v in checks.items()},
+        "evidence": evidence,
+        "notes": _diagnostic_notes(fields_table),
+    }
+
+
+def compute_decision_rural(fields_table, raw_results, choice_groups, record):
+    """Mode RURAL (V11, BARU): Final Status HANYA ditentukan oleh
+    RURAL_DECISIVE_FIELDS (Nama, Nomor Rekening, Nominal Penempatan, TTD
+    Nasabah, TTD BRI) -- kelimanya 'passed' (OK) -> decision OK; salah satu
+    TOLAK/REVIEW -> decision TOLAK/REVIEW dgn alasan field itu (frontend
+    menampilkan REVIEW & TOLAK sbg badge 'TOLAK - alasan' yang sama, lihat
+    static/index.html resolveHasilAkhir -- konsisten dgn mode urban).
+
+    Tenor & Bentuk Reward TETAP dibaca & dibandingkan (validate_tenor/
+    validate_reward, EVIDENCE SAMA PERSIS dgn mode urban) tapi TIDAK ikut
+    menentukan decision -- kalau statusnya bukan OK, pesannya masuk ke
+    'notes' (lihat RURAL_NOTE_FIELDS), bukan 'reasons'."""
+    checks, evidence = _compute_all_checks(fields_table, raw_results, choice_groups, record)
+    decision, reasons = _decide_from_checks(checks, RURAL_DECISIVE_FIELDS)
+
+    notes = _diagnostic_notes(fields_table)
+    for field_name, badge in RURAL_NOTE_FIELDS.items():
+        status, _reason = checks.get(field_name, (None, None))
+        if status == "TOLAK" and badge not in notes:
+            notes.append(badge)
 
     return {
         "decision": decision,
         "reasons": reasons,
         "checks": {k: v[0] for k, v in checks.items()},
-        "evidence": {"tenor_penempatan": tenor_evidence, "bentuk_reward": reward_evidence},
+        "evidence": evidence,
+        "notes": notes,
+        "wilayah": "rural",
     }
+
+
+def compute_decision(fields_table, raw_results, choice_groups, record):
+    """Dispatcher V11 -- SATU titik masuk yang dipanggil app.py: pilih
+    compute_decision_v9_2 (urban, perilaku TIDAK BERUBAH) atau
+    compute_decision_rural (rural, BARU) berdasarkan _wilayah_mode(record).
+    Return dict dgn bentuk yang SAMA utk kedua mode (selalu ada key
+    'notes'/'wilayah') supaya pemanggil (app.py/frontend) tidak perlu
+    bercabang lagi."""
+    if _wilayah_mode(record) == "urban":
+        result = compute_decision_v9_2(fields_table, raw_results, choice_groups, record)
+        result.setdefault("notes", [])
+        result["wilayah"] = "urban"
+        return result
+    return compute_decision_rural(fields_table, raw_results, choice_groups, record)

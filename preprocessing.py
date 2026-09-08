@@ -26,6 +26,14 @@ import pymupdf as fitz
 PDF_DPI = 180
 PHOTO_RECTIFY = True
 
+# V13 -- lihat _find_document_quad(): minimal fraksi area foto yg harus
+# ditempati kertas (kontur terluar) supaya dianggap "kertas ketemu" & layak
+# di-rectify. Sama seperti batas lama (rectify_photo V-awal), dipertahankan
+# supaya tidak asal menerima kontur kecil sbg kertas -- yang berubah adalah
+# ROBUSTNESS deteksi kontur itu sendiri (adaptif thd pencahayaan + tepi
+# terputus), bukan seberapa longgar syarat ukurannya.
+DOCUMENT_QUAD_MIN_AREA_RATIO = 0.30
+
 ALIGN_MAX_SIDE = 1800
 ALIGN_FEATURES = 6000
 ALIGN_RATIO = 0.78
@@ -294,6 +302,21 @@ def _looks_like_pdf(path):
         return False
 
 
+def is_pdf_document(path):
+    """Deteksi PDF dari EKSTENSI ATAU ISI FILE -- satu-satunya cara yang
+    benar utk membedakan PDF vs foto (JPEG/PNG) pada dokumen hasil download
+    Google Drive, yang disimpan tanpa ekstensi (`<file_id>`, lihat
+    data_input.download_drive_document). Sebelum V13, beberapa pemanggil
+    (prepare_input/prepare_and_align) memakai `Path(path).suffix.lower() ==
+    ".pdf"` saja -- SELALU False utk file tanpa ekstensi, sehingga dokumen
+    PDF asli salah dikira foto dan masuk ke jalur enhance_scan/rectify_photo
+    (didesain utk foto kamera dgn latar belakang, bukan render PDF penuh
+    bingkai) secara sia-sia/keliru. Dipakai di semua tempat yang sebelumnya
+    mengecek `suffix == ".pdf"` supaya konsisten dgn load_document()."""
+    path = str(path)
+    return Path(path).suffix.lower() == ".pdf" or _looks_like_pdf(path)
+
+
 def load_document(path, dpi=PDF_DPI):
     path = str(path)
     ext = Path(path).suffix.lower()
@@ -356,23 +379,121 @@ def _order_points(points):
     return rect
 
 
+DOCUMENT_QUAD_MAX_AREA_RATIO = 0.985  # tolak "kontur = nyaris seluruh frame"
+                                       # (segmentasi gagal membedakan latar
+                                       # sama sekali, bukan kertas ketemu)
+
+
+def _quad_from_contour(contour):
+    """approxPolyDP 4-titik kalau bisa (mengikuti bentuk kertas apa adanya,
+    termasuk trapesium akibat perspektif); fallback minAreaRect(convexHull)
+    kalau tepinya tidak lurus sempurna (umum pd foto kamera nyata)."""
+    peri = cv2.arcLength(contour, True)
+    approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+    if len(approx) == 4 and cv2.isContourConvex(approx):
+        return approx.reshape(4, 2).astype(np.float32)
+    hull = cv2.convexHull(contour)
+    return cv2.boxPoints(cv2.minAreaRect(hull)).astype(np.float32)
+
+
+def _largest_valid_contour(contours, img_area, min_area_ratio):
+    """Kontur terbesar yang lolos rentang area [min_area_ratio,
+    DOCUMENT_QUAD_MAX_AREA_RATIO], atau None. Dipisah dari pemanggil supaya
+    tiap strategi deteksi (segmentasi kecerahan / tepi) bisa dibandingkan
+    dgn kriteria yang sama."""
+    if not contours or img_area <= 0:
+        return None, None
+    largest = max(contours, key=cv2.contourArea)
+    ratio = float(cv2.contourArea(largest)) / img_area
+    if min_area_ratio <= ratio <= DOCUMENT_QUAD_MAX_AREA_RATIO:
+        return largest, ratio
+    return None, ratio
+
+
+def _paper_mask(gray, invert):
+    """Segmentasi kertas via Otsu (kecerahan), BUKAN tepi -- jauh lebih tahan
+    thd tepi kertas yang bergradasi lembut/redup krn bayangan atau fokus
+    kamera (lihat _find_document_quad utk root-cause). invert=False utk
+    kasus umum (kertas TERANG di latar lebih gelap); invert=True utk kasus
+    kertas GELAP di latar TERANG. Morphology close+open (kernel skala
+    resolusi) mengisi lubang teks & buang noise kecil di dalam mask supaya
+    kontur luarnya bersih, satu blok."""
+    sigma = max(3.0, min(gray.shape) * 0.01)
+    blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=sigma)
+    mode = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+    _, mask = cv2.threshold(blur, 0, 255, mode + cv2.THRESH_OTSU)
+    k = max(3, int(min(gray.shape) * 0.02)) | 1
+    kernel = np.ones((k, k), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    return mask
+
+
+def _find_document_quad(image, min_area_ratio=DOCUMENT_QUAD_MIN_AREA_RATIO):
+    """Deteksi kuadrilateral kertas dlm foto. Dipakai OLEH rectify_photo
+    (produksi) DAN oleh diagnostik evaluasi (stage_evaluation.py) supaya
+    keduanya konsisten "melihat" tepi kertas dgn cara yang SAMA.
+
+    V13 -- root-cause fix: evaluasi 25-record menunjukkan pendekatan lama
+    (Canny tepi tetap + syarat approxPolyDP PERSIS 4 titik) GAGAL menemukan
+    page_quad pada SEMUA foto (kontur terbesar yg ketemu cuma ~2-6% frame),
+    padahal kertas jelas dominan secara VISUAL. Root cause TERVERIFIKASI via
+    inspeksi manual: tepi kertas di foto kamera nyata sering punya GRADIEN
+    SANGAT LEMBUT (blur fokus/pencahayaan rata), jauh lebih lemah drpd
+    kontras internal (teks/tabel) -- Canny (berbasis gradien tepi) SELALU
+    menangkap teks internal duluan & TIDAK PERNAH menutup satu loop penuh
+    sekeliling kertas walau sudah pakai threshold adaptif + dilasi.
+
+    Perbaikan UTAMA: deteksi lewat SEGMENTASI KECERAHAN (Otsu threshold
+    kertas-vs-latar, region-based) sbg strategi pertama -- jauh lebih tahan
+    thd tepi lembut krn tidak bergantung pada gradien tajam, hanya beda
+    terang/gelap kertas vs latar (terverifikasi pada sampel dataset: rasio
+    area naik dari ~0.03 jadi 0.65-0.99, sesuai proporsi visual sebenarnya).
+    Coba 2 arah (kertas terang DAN kertas gelap), lalu deteksi tepi (Canny
+    adaptif+dilasi, versi sebelumnya) sbg fallback TERAKHIR kalau segmentasi
+    kecerahan gagal (mis. latar & kertas sama-sama terang/tekstur kompleks).
+    Kandidat dgn rasio area TERBESAR (dlm rentang valid) yang menang.
+
+    Tetap AMAN dipakai agresif krn prepare_and_align() hanya memakai hasil
+    rectify kalau skor alignment-nya OBJEKTIF LEBIH BAIK drpd dokumen asli
+    (lihat _alignment_quality_score) -- quad yang meleset tidak akan lolos,
+    otomatis kembali ke dokumen asli.
+
+    Return (quad_4x2_float32_atau_None, area_ratio_kandidat_terbaik_atau_None)
+    -- area_ratio dilaporkan walau di bawah min_area_ratio (utk diagnostik)."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    img_area = image.shape[0] * image.shape[1]
+
+    candidates = []  # list of (ratio, contour)
+    for invert in (False, True):
+        mask = _paper_mask(gray, invert)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contour, ratio = _largest_valid_contour(contours, img_area, min_area_ratio)
+        if contour is not None:
+            candidates.append((ratio, contour))
+
+    if not candidates:
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        median = float(np.median(blurred))
+        lo, hi = int(max(0, 0.66 * median)), int(min(255, 1.33 * median))
+        edges = cv2.dilate(cv2.Canny(blurred, lo, hi), np.ones((5, 5), np.uint8), iterations=1)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contour, ratio = _largest_valid_contour(contours, img_area, min_area_ratio)
+        if contour is not None:
+            candidates.append((ratio, contour))
+        elif ratio is not None:
+            return None, ratio  # laporkan rasio kandidat tepi utk diagnostik
+
+    if not candidates:
+        return None, None
+
+    best_ratio, best_contour = max(candidates, key=lambda c: c[0])
+    return _quad_from_contour(best_contour), best_ratio
+
+
 def rectify_photo(image, template_shape):
     """Deteksi tepi kertas + perspective warp agar sejajar dengan template."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(gray, 50, 150)
-    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:20]
-    min_area = image.shape[0] * image.shape[1] * 0.30
-
-    page_quad = None
-    for contour in contours:
-        peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-        if len(approx) == 4 and cv2.contourArea(contour) >= min_area:
-            page_quad = approx.reshape(4, 2)
-            break
-
+    page_quad, _ratio = _find_document_quad(image)
     if page_quad is None:
         return image, {"rectified": False, "reason": "page_not_found"}
 
@@ -386,7 +507,7 @@ def rectify_photo(image, template_shape):
 
 def prepare_input(path, image, template_shape):
     """Untuk foto (bukan PDF): enhance pencahayaan/kontras lalu rectify perspektif."""
-    if Path(path).suffix.lower() == ".pdf" or not PHOTO_RECTIFY:
+    if is_pdf_document(path) or not PHOTO_RECTIFY:
         return image, {"rectified": False, "reason": "not_needed"}
     enhanced = enhance_scan(image)
     rectified, meta = rectify_photo(enhanced, template_shape)
@@ -767,7 +888,7 @@ def prepare_and_align(path, raw_image, template_img):
     prep_meta versi sebelumnya)."""
     aligned_raw, H_raw, meta_raw = align_to_template(template_img, raw_image)
 
-    is_pdf = Path(path).suffix.lower() == ".pdf"
+    is_pdf = is_pdf_document(path)
     if is_pdf or not PHOTO_RECTIFY:
         meta_raw["candidate"] = "raw"
         meta_raw["input_preparation"] = {"rectified": False, "reason": "not_needed"}

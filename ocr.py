@@ -17,15 +17,14 @@ import numpy as np
 from paddleocr import PaddleOCR
 
 # ============================================================================
-# MIXING MODEL -- pilih engine OCR yang dipakai lewat OCR_ENGINE.
-# "paddle" adalah default AKTIF (satu-satunya yang punya dependency terpasang
-# di requirements.txt). 3 engine lain disediakan sebagai KERANGKA (kode +
-# instruksi) yang tinggal di-uncomment kalau mau dicoba -- tiap engine WAJIB
-# mengembalikan bentuk yang sama: list[{"text": str, "confidence": float|None,
-# "bbox": (x1,y1,x2,y2)|None}], supaya assign_items_to_fields() di bawah tidak
-# perlu diubah sama sekali (kontrak output disamakan lintas model).
+# MIXING MODEL -- OCR_ENGINE menentukan engine yang dipakai. "paddle" adalah
+# satu-satunya engine yang diimplementasikan & dependency-nya ada di
+# requirements.txt. Kontrak output (dipakai assign_items_to_fields() dkk):
+# list[{"text": str, "confidence": float|None, "bbox": (x1,y1,x2,y2)|None}].
+# Kalau suatu saat perlu engine lain, tambahkan cabang baru di run_ocr() yang
+# mengembalikan bentuk yang sama persis.
 # ============================================================================
-OCR_ENGINE = "paddle"   # ganti ke "easyocr" / "trocr" / "tesseract" utk coba model lain
+OCR_ENGINE = "paddle"
 
 # --- Konfigurasi model PaddleOCR (AKTIF) ---
 # CATATAN GPU: sebelumnya "os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')"
@@ -118,87 +117,6 @@ def get_ocr_engine():
     return _ocr_engine
 
 
-# ----------------------------------------------------------------------------
-# ALTERNATIF 1: EasyOCR
-# Install : pip install easyocr
-# Cocok utk  : perbandingan cepat, mendukung banyak bahasa sekaligus.
-# ----------------------------------------------------------------------------
-# import easyocr
-# _easyocr_engine = None
-#
-# def get_easyocr_engine():
-#     global _easyocr_engine
-#     if _easyocr_engine is None:
-#         _easyocr_engine = easyocr.Reader(["id", "en"], gpu=False)
-#     return _easyocr_engine
-#
-# def run_ocr_easyocr(image):
-#     items = []
-#     for bbox, text, conf in get_easyocr_engine().readtext(image):
-#         text = str(text).strip()
-#         if not text:
-#             continue
-#         xs = [p[0] for p in bbox]; ys = [p[1] for p in bbox]
-#         items.append({
-#             "text": text, "confidence": float(conf),
-#             "bbox": (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))),
-#         })
-#     return items
-
-
-# ----------------------------------------------------------------------------
-# ALTERNATIF 2: TrOCR (HuggingFace transformers) -- khusus tulisan tangan
-# Install : pip install transformers torch pillow
-# Cocok utk  : tulisan tangan (handwritten), tapi TIDAK punya deteksi bbox
-#              sendiri -- dipakai per-CROP FIELD (bukan satu kanvas gabungan
-#              seperti paddle), jadi assign_items_to_fields() dilewati kalau
-#              engine ini dipakai (lihat catatan di run_ocr()).
-# ----------------------------------------------------------------------------
-# from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-# from PIL import Image as PILImage
-# _trocr_processor, _trocr_model = None, None
-#
-# def get_trocr_engine():
-#     global _trocr_processor, _trocr_model
-#     if _trocr_model is None:
-#         _trocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
-#         _trocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
-#     return _trocr_processor, _trocr_model
-#
-# def run_ocr_trocr_single_crop(image_bgr):
-#     """Dipanggil PER FIELD CROP (bukan kanvas gabungan) -> return 1 string."""
-#     processor, model = get_trocr_engine()
-#     pil_img = PILImage.fromarray(image_bgr[:, :, ::-1])  # BGR -> RGB
-#     pixel_values = processor(images=pil_img, return_tensors="pt").pixel_values
-#     generated_ids = model.generate(pixel_values)
-#     return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-
-
-# ----------------------------------------------------------------------------
-# ALTERNATIF 3: Tesseract (pytesseract)
-# Install : pip install pytesseract  (+ install binary tesseract-ocr di OS,
-#           dan paket bahasa: tesseract-ocr-ind utk Bahasa Indonesia)
-# Cocok utk  : baseline ringan/cepat, cocok utk teks cetak; kurang akurat
-#              utk tulisan tangan dibanding paddle/trocr.
-# ----------------------------------------------------------------------------
-# import pytesseract
-#
-# def run_ocr_tesseract(image):
-#     data = pytesseract.image_to_data(
-#         image, lang="ind", output_type=pytesseract.Output.DICT,
-#         config="--psm 6",
-#     )
-#     items = []
-#     for i, text in enumerate(data["text"]):
-#         text = str(text).strip()
-#         if not text:
-#             continue
-#         conf = float(data["conf"][i]) / 100.0 if str(data["conf"][i]) not in ("-1", "") else None
-#         x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
-#         items.append({"text": text, "confidence": conf, "bbox": (x, y, x + w, y + h)})
-#     return items
-
-
 def _payload(result):
     data = result.json
     if callable(data):
@@ -253,21 +171,10 @@ def _run_ocr_paddle(image):
 
 def run_ocr(image):
     """Satu pemanggilan model OCR -> list item {text, confidence, bbox}.
-    Dispatcher berdasarkan OCR_ENGINE -- ganti konstanta itu (bukan fungsi
-    ini) untuk pindah model. Engine selain 'paddle' butuh uncomment kode +
-    install dependency di atas terlebih dahulu."""
+    Dispatcher berdasarkan OCR_ENGINE -- tambah cabang baru di sini kalau
+    suatu saat perlu engine selain paddle."""
     if OCR_ENGINE == "paddle":
         return _run_ocr_paddle(image)
-    # if OCR_ENGINE == "easyocr":
-    #     return run_ocr_easyocr(image)
-    # if OCR_ENGINE == "tesseract":
-    #     return run_ocr_tesseract(image)
-    # if OCR_ENGINE == "trocr":
-    #     raise RuntimeError(
-    #         "trocr bekerja per-crop field, bukan kanvas gabungan -- pipeline.py "
-    #         "perlu memanggil run_ocr_trocr_single_crop() per field, bukan run_ocr() "
-    #         "sekali untuk kanvas. Lihat komentar ALTERNATIF 2 di atas."
-    #     )
     raise ValueError(f"OCR_ENGINE tidak dikenal: {OCR_ENGINE!r}")
 
 

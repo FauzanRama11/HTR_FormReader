@@ -149,7 +149,10 @@ def build_text_field_result(name, cfg, ocr_item):
     valid = validate_value(value, cfg["type"])
     confidence = ocr_item.get("confidence")
     status = resolve_field_status(raw_text, value, valid, confidence, cfg["type"])
-    return {"value": value, "raw": raw_text or None, "confidence": confidence, "status": status}
+    # "valid": dipakai comparison._diagnostic_notes utk bedakan "format value
+    # OK tapi confidence rendah" (OCR Kurang Yakin) vs "value gagal terbaca
+    # benar" (ROI Bermasalah) -- lihat V11 handover #4.
+    return {"value": value, "raw": raw_text or None, "confidence": confidence, "status": status, "valid": valid}
 
 
 # ============================================================================
@@ -349,6 +352,7 @@ def resolve_tenor_source(groups, raw_results):
     if derived_value is not None:
         return {"value": derived_value, "source": "rentang_tenor", "status": "detected", "reason": derive_reason}
 
+    
     status = "blank" if choice_status == "blank" and not range_raw else "review"
     return {"value": None, "source": "none", "status": status, "reason": tenor.get("reason") or derive_reason}
 
@@ -538,6 +542,8 @@ def build_fields_table(final_results, field_types):
             "confidence": result.get("confidence"),
             "source": result.get("source"),
             "reason": result.get("reason"),
+            "notes": result.get("notes"),
+            "valid": result.get("valid"),
         })
     return fields_table
 

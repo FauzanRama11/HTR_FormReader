@@ -1,11 +1,40 @@
-fastapi
-uvicorn[standard]
-python-multipart
-opencv-python-headless
-numpy
-pymupdf
-paddleocr
-paddlepaddle
-pandas
-openpyxl
-gdown
+# Core web app (app.py)
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-multipart==0.0.32
+pydantic==2.13.4
+
+# Image / PDF / data I/O (preprocessing.py, data_input.py, evaluation*.py)
+opencv-python-headless==5.0.0.93
+numpy==2.3.5
+pymupdf==1.28.2
+pandas==3.0.5
+openpyxl==3.1.5
+gdown==6.1.0
+
+# OCR engine (ocr.py) -- PRIMARY, always required.
+# paddlepaddle (CPU build) works everywhere out of the box; ocr.py auto-detects
+# GPU at runtime and falls back to CPU on its own. For actual GPU acceleration,
+# install the matching GPU build for your CUDA version INSTEAD of this line,
+# e.g.: pip install paddlepaddle-gpu==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cuXXX/
+# (dev machine used paddlepaddle-gpu==3.2.0 with CUDA; do not assume that build
+# installs cleanly on a machine without a matching NVIDIA driver/CUDA toolkit).
+paddleocr==3.7.0
+paddlepaddle==3.2.0
+
+# VLM fallback (vlm.py, Qwen2-VL-2B-Instruct) -- OPTIONAL: pipeline.py's
+# VLM_FALLBACK_ENABLED works without these installed (vlm._load() raises a
+# clear RuntimeError telling you to install requirements.txt, and pipeline.py's
+# fallback call sites already handle that failure), but decisive-field fallback
+# accuracy depends on the VLM actually being available. Install these to
+# enable it. GPU (CUDA) build of torch is recommended for usable latency; the
+# default PyPI wheel below is CPU-only on most platforms -- see
+# https://pytorch.org/get-started/locally/ for a CUDA-matched install command.
+torch>=2.4
+transformers>=4.49
+accelerate>=0.34
+pillow==12.3.0
+
+# Model weights (models/Qwen2-VL-2B-Instruct/) are NOT installed via pip --
+# download separately (see vlm.py's VLM_MODEL_PATH / DEFAULT_LOCAL_CANDIDATES)
+# and are gitignored (*.safetensors/*.bin/*.pt in .gitignore).

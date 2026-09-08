@@ -1,7 +1,7 @@
-"""VLM lokal untuk ekstraksi formulir full-page + second-pass area detail.
-
-Tidak menggunakan PaddleOCR/Tesseract/OCR engine. Model melihat template kosong
-sebagai referensi dan dokumen terisi sebagai target.
+"""VLM lokal (Qwen2-VL, lazy-loaded) -- dipakai HANYA sbg fallback V10 lewat
+extract_fields_independent() (lihat pipeline._run_vlm_fallback): membaca
+field yang diminta secara independen dari halaman/crop dokumen, TANPA nilai
+referensi apa pun di prompt. Tidak menggunakan PaddleOCR/Tesseract/OCR engine.
 """
 import json
 import os
@@ -24,25 +24,14 @@ DEVICE_ENV = os.environ.get("VLM_DEVICE", "auto").strip().lower()
 
 # ----------------------------------------------------------------------------
 # HEMAT TOKEN: gambar yang dikirim ke VLM diubah jadi token gambar (jumlahnya
-# naik seiring resolusi). Ada 3 titik hemat yang TIDAK mengurangi kebutuhan:
-# 1) MAX_SIDE_TEMPLATE diturunkan (bukan MAX_SIDE_FULL/dokumen) karena template
-#    hanya berisi label cetak -- tidak perlu se-detail dokumen tulisan tangan.
-#    Template ini juga ikut dikirim pada SETIAP panggilan (full + tiap detail
-#    zone), jadi penurunan di sini paling terasa hematnya.
-# 2) MAX_NEW_TOKENS_* diturunkan tipis (bukan dipepetkan) -- masih cukup untuk
-#    JSON terpanjang yang mungkin muncul, hanya membuang buffer berlebih.
-# 3) DETAIL_MODE default diubah ke "auto" di pipeline.py (lihat file itu):
-#    zone yang bukan field visual (coretan/tanda tangan) dilewati bila full
-#    page sudah yakin, sementara zone visual-critical TETAP selalu diverifikasi
-#    dua kali supaya akurasi tidak turun.
-# Semua nilai ini tetap bisa dioverride lewat environment variable bila perlu
-# resolusi/token lebih tinggi untuk dokumen yang sulit dibaca.
+# naik seiring resolusi). MAX_SIDE_FULL (halaman penuh) & MAX_SIDE_DETAIL
+# (crop per-field) dipakai oleh extract_fields_independent() -- satu-satunya
+# jalur VLM yang aktif (fallback V10, lihat pipeline._run_vlm_fallback).
+# Tetap bisa dioverride lewat environment variable bila perlu resolusi lebih
+# tinggi untuk dokumen yang sulit dibaca.
 # ----------------------------------------------------------------------------
 MAX_SIDE_FULL = int(os.environ.get("VLM_MAX_SIDE_FULL", "1600"))
-MAX_SIDE_TEMPLATE = int(os.environ.get("VLM_MAX_SIDE_TEMPLATE", "1100"))
 MAX_SIDE_DETAIL = int(os.environ.get("VLM_MAX_SIDE_DETAIL", "1500"))
-MAX_NEW_TOKENS_FULL = int(os.environ.get("VLM_MAX_NEW_TOKENS_FULL", "360"))
-MAX_NEW_TOKENS_DETAIL = int(os.environ.get("VLM_MAX_NEW_TOKENS_DETAIL", "220"))
 
 if OFFLINE:
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -52,55 +41,6 @@ _model = None
 _processor = None
 _device = None
 _model_path = None
-
-FULL_KEYS = [
-    "nama_nasabah", "nomor_rekening", "unit_kerja_pengelola_rekening",
-    "nominal_penempatan", "tenor_penempatan", "rentang_tenor",
-    "bentuk_reward", "reward_non_tunai", "reward_tunai",
-    "tempat_tanggal_surat", "signature_nasabah", "signature_atasan",
-]
-
-FULL_PROMPT = r"""
-Anda membaca formulir Indonesia yang memiliki TEMPLATE KOSONG dan DOKUMEN TERISI.
-Gambar pertama adalah TEMPLATE KOSONG. Gambar kedua adalah DOKUMEN TERISI.
-Bandingkan keduanya dan ambil HANYA nilai yang diisi/ditulis/ditandai pada dokumen terisi.
-Jangan menyalin label cetak seperti "Nama Nasabah", "Nomor Rekening", atau potongan kata label.
-
-Aturan pilihan visual:
-- Tenor Penempatan menyediakan 1 / 3 / 6 Bulan dengan instruksi *coret salah satu*.
-  Jika dua pilihan dicoret, nilai yang TIDAK dicoret adalah jawaban. Jika hanya satu yang diberi tanda/lingkaran, nilai bertanda adalah jawaban.
-- Bentuk Reward menyediakan tunai / non tunai dengan instruksi *coret salah satu*.
-  Gunakan logika yang sama. Kembalikan hanya "tunai" atau "non_tunai".
-- signature_nasabah dan signature_atasan hanya menilai ADA/TIDAK ADA goresan tanda tangan pada area masing-masing; jangan mengidentifikasi orangnya.
-- Jika tidak yakin, isi null. Jangan menebak.
-- Pertahankan tulisan nama/unit/rentang tanggal apa adanya sebisa mungkin.
-
-Balas HANYA satu objek JSON valid, tanpa markdown, dengan key persis berikut:
-{
-  "nama_nasabah": string|null,
-  "nomor_rekening": string|null,
-  "unit_kerja_pengelola_rekening": string|null,
-  "nominal_penempatan": string|null,
-  "tenor_penempatan": 1|3|6|null,
-  "rentang_tenor": string|null,
-  "bentuk_reward": "tunai"|"non_tunai"|null,
-  "reward_non_tunai": string|null,
-  "reward_tunai": string|null,
-  "tempat_tanggal_surat": string|null,
-  "signature_nasabah": true|false|null,
-  "signature_atasan": true|false|null
-}
-""".strip()
-
-DETAIL_PROMPT_TEMPLATE = r"""
-Gambar pertama adalah potongan TEMPLATE KOSONG. Gambar kedua adalah area yang sama dari DOKUMEN TERISI.
-Baca hanya field berikut: {fields}.
-Bandingkan template vs dokumen agar teks label cetak tidak ikut dianggap sebagai nilai.
-Untuk pilihan 1/3/6 atau tunai/non tunai, pahami coretan/lingkaran secara visual sesuai instruksi *coret salah satu*.
-Untuk signature, kembalikan true bila ada tanda tangan/goretan nyata pada area tanda tangan, false bila kosong, null bila tidak yakin.
-Jangan menebak. Balas HANYA JSON valid yang berisi key yang diminta, tanpa markdown.
-""".strip()
-
 
 def _resolve_model_path():
     if MODEL_PATH_ENV:
@@ -186,14 +126,6 @@ def _load():
 
     _model = _model.to(_device).eval()
     return _model, _processor, _device
-
-
-def runtime_info():
-    return {
-        "model_path": _model_path or MODEL_PATH_ENV or "auto-local",
-        "device": _device or DEVICE_ENV,
-        "offline": OFFLINE,
-    }
 
 
 def _resize_bgr(image, max_side):
@@ -303,29 +235,6 @@ def _infer(images_bgr, prompt, max_new_tokens, max_sides):
     return _extract_json(text), text
 
 
-def extract_full_page(template_bgr, document_bgr):
-    data, raw_text = _infer(
-        [template_bgr, document_bgr],
-        FULL_PROMPT,
-        MAX_NEW_TOKENS_FULL,
-        [MAX_SIDE_TEMPLATE, MAX_SIDE_FULL],
-    )
-    # Hanya key kontrak yang diterima; key liar dibuang.
-    clean = {k: data.get(k) for k in FULL_KEYS}
-    return clean, raw_text
-
-
-def extract_detail(template_crop_bgr, document_crop_bgr, fields):
-    prompt = DETAIL_PROMPT_TEMPLATE.format(fields=", ".join(fields))
-    data, raw_text = _infer(
-        [template_crop_bgr, document_crop_bgr],
-        prompt,
-        MAX_NEW_TOKENS_DETAIL,
-        [MAX_SIDE_DETAIL, MAX_SIDE_DETAIL],
-    )
-    return {k: data.get(k) for k in fields}, raw_text
-
-
 # ============================================================================
 # V10 -- FALLBACK KONTRAK "INDEPENDENT READ" (dipakai pipeline.py sbg fallback
 # Paddle, BUKAN default). Prompt ini SENGAJA TIDAK PERNAH menyertakan nilai
@@ -362,6 +271,98 @@ Balas HANYA satu objek JSON valid, tanpa markdown, dengan key persis nama
 field yang diminta, masing-masing berisi objek {{"value": string|null,
 "status": "readable"|"uncertain"|"not_visible"}}.
 """.strip()
+
+
+# ============================================================================
+# V12 -- FULL-PAGE FALLBACK CONTRACT. Dipanggil oleh pipeline.py sbg PRIORITAS
+# KEDUA (setelah OCR Primary, SEBELUM ROI/template crop fallback -- lihat
+# pipeline._run_vlm_fullpage_fallback). SATU panggilan, HANYA halaman penuh
+# yang sudah di-align/preprocess (`aligned_img_bgr`) -- TIDAK PERNAH menerima
+# crop ROI di tahap ini (crop baru dipakai di tahap ROI/template & second-
+# pass VLM sesudahnya). Nama field di prompt/response memakai nama level-
+# spesifikasi (nama_nasabah, nomor_rekening, unit_kerja, nominal_penempatan,
+# tenor, bentuk_reward, signature_nasabah, signature_unit_kerja,
+# tanggal_mulai, tanggal_selesai) -- pemanggil (pipeline.py) yang memetakan
+# balik ke nama field internal (lihat pipeline.VLM_FULLPAGE_FIELD_MAP).
+# ============================================================================
+
+FULLPAGE_PROMPT_TEMPLATE = r"""
+Anda membaca SATU HALAMAN PENUH formulir Indonesia yang sudah diisi tangan
+(foto/scan sudah diluruskan/dikoreksi). Baca HANYA field berikut, PERSIS
+seperti yang tertulis/tertanda secara visual pada halaman ini:
+{fields}
+
+Aturan WAJIB:
+- Baca apa adanya. JANGAN menebak, melengkapi, menormalisasi, atau
+  mengoreksi ejaan/format.
+- Anda TIDAK diberi nilai pembanding apa pun -- laporkan hanya apa yang
+  benar-benar terlihat di halaman ini.
+- Kalau tulisan tidak bisa dipastikan (buram/tertutup/ambigu), set status
+  "uncertain" dan value berisi bacaan terbaik Anda (boleh null kalau
+  benar-benar tidak ada bacaan).
+- Kalau field tidak terlihat sama sekali di halaman ini, set status
+  "not_visible" dan value null.
+- Kalau terbaca jelas & yakin, set status "readable".
+{tenor_rule}{signature_rule}
+Balas HANYA satu objek JSON valid, tanpa markdown, dengan key persis nama
+field yang diminta, masing-masing berisi objek {{"value": string|null,
+"status": "readable"|"uncertain"|"not_visible"}}.
+""".strip()
+
+_TENOR_RULE = """
+- Field "tenor": pilihan yang DITANDAI/DICORET nasabah di antara opsi
+  "1 bulan" / "3 bulan" / "6 bulan" -- ini adalah bukti UTAMA. Laporkan
+  HANYA salah satu dari ketiga nilai persis itu (atau null kalau tidak
+  yakin opsi mana yang ditandai) -- jangan menuliskan nilai lain.
+- Field "tanggal_mulai" & "tanggal_selesai" HANYA bukti SEKUNDER (dipakai
+  program utk mem-validasi/menurunkan tenor kalau pilihan di atas tidak
+  ada/tidak yakin) -- baca apa adanya, JANGAN dipakai utk mengoreksi nilai
+  field "tenor".
+"""
+
+_SIGNATURE_RULE = """
+- Field "signature_nasabah"/"signature_unit_kerja": laporkan value "ada"
+  kalau tampak ada goresan tanda tangan berarti di area itu, "kosong" kalau
+  area tampak bersih/kosong. Status tetap ikuti aturan umum di atas (set
+  "uncertain" kalau area tampak ada tinta tapi tidak yakin itu tanda tangan
+  atau sekadar noda/coretan lain).
+"""
+
+
+def extract_fields_fullpage(aligned_img_bgr, spec_fields, max_new_tokens=None):
+    """Full-Page VLM (PRIORITAS ke-2 di pipeline V12, lihat modul docstring
+    di atas). `aligned_img_bgr`: satu gambar, halaman PENUH yang sudah
+    di-align/preprocess -- TIDAK PERNAH crop ROI. `spec_fields`: list nama
+    field level-spesifikasi (boleh termasuk "tenor"/"tanggal_mulai"/
+    "tanggal_selesai"/"signature_nasabah"/"signature_unit_kerja"/dst).
+    Return (results: dict[spec_field -> {"value":.., "status":..}], raw_text).
+    SATU panggilan model walau field yang diminta >1 (sama seperti
+    extract_fields_independent, kontrak status readable/uncertain/
+    not_visible identik)."""
+    if not spec_fields:
+        return {}, ""
+    tenor_rule = _TENOR_RULE if "tenor" in spec_fields else ""
+    signature_rule = _SIGNATURE_RULE if any(f.startswith("signature_") for f in spec_fields) else ""
+    prompt = FULLPAGE_PROMPT_TEMPLATE.format(
+        fields=", ".join(spec_fields), tenor_rule=tenor_rule, signature_rule=signature_rule,
+    )
+    tokens = max_new_tokens or max(160, 90 * len(spec_fields))
+    data, raw_text = _infer([aligned_img_bgr], prompt, tokens, [MAX_SIDE_FULL])
+
+    clean = {}
+    for f in spec_fields:
+        item = data.get(f)
+        if isinstance(item, dict):
+            value = item.get("value")
+            status = item.get("status")
+            if status not in _ALLOWED_INDEPENDENT_STATUSES:
+                status = "readable" if value else "not_visible"
+        elif item:
+            value, status = str(item), "readable"
+        else:
+            value, status = None, "not_visible"
+        clean[f] = {"value": value, "status": status}
+    return clean, raw_text
 
 
 def extract_fields_independent(images_bgr, fields, max_new_tokens=None, max_sides=None):
