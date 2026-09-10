@@ -73,8 +73,19 @@ def _normalize_for_compare(value, data_type):
         return ""
     text = str(value).strip()
 
-    if data_type in ("numeric", "tenor"):
+    if data_type == "tenor":
         return re.sub(r"\D", "", text)
+
+    if data_type == "numeric":
+        # V18 Fix 1b -- lstrip leading zero (SAMA persis spt "currency" 3
+        # baris di bawah, pola yg SUDAH terbukti aman di sini): ground truth
+        # nomor rekening di spreadsheet sumber kadang kehilangan leading
+        # zero (koersi numerik Excel di hulu sistem ini), sehingga nomor yg
+        # SAMA persis bisa salah ke-TOLAK di real decision. TIDAK digabung
+        # ke branch "tenor" di atas -- tenor (jumlah bulan) tidak butuh &
+        # tidak boleh ikut tersentuh oleh perubahan ini.
+        digits = re.sub(r"\D", "", text)
+        return digits.lstrip("0") or ("0" if digits else "")
 
     if data_type == "currency":
         text = re.sub(r"(?i)rp\.?", "", text).split("(")[0]

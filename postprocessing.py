@@ -16,6 +16,7 @@ from preprocessing import (
     CHOICE_GROUPS, SIGNATURE_CONFIG, FIELD_CONFIG, FIELD_ORDER,
     locate_anchor_offset, resolve_roi, ink_change_ratio, difference_mask,
     norm_bbox_to_px, _shift_bbox, _crop, _remove_line_noise,
+    signature_static_content_mask,
     is_out_of_frame as _is_out_of_frame,
 )
 
@@ -25,9 +26,72 @@ CHOICE_MIN_GAP = 0.004
 
 # --- Signature (lihat process_signatures) ---
 SIGNATURE_MIN_COMPONENT_AREA = 12        # px^2, buang noise speck/debu scan
-SIGNATURE_ABSENT_AREA_RATIO = 0.004      # di bawah ini -> "absent"
-SIGNATURE_PRESENT_AREA_RATIO = 0.012     # di atas ini (+ sebaran cukup) -> "present"
-SIGNATURE_MIN_SPREAD_RATIO = 0.15        # sebaran horizontal/vertikal min. relatif ROI
+SIGNATURE_ABSENT_AREA_RATIO = 0.004      # default lama (dipakai kalau nama field tidak ada di profil)
+SIGNATURE_PRESENT_AREA_RATIO = 0.012
+SIGNATURE_MIN_SPREAD_RATIO = 0.15
+
+# V17 Finding 4 -- kalau RAW difference_mask (SEBELUM _remove_line_noise,
+# SETELAH static-content-mask Finding 3 dikurangi) mencakup fraksi piksel
+# sebesar ini atau lebih, dianggap "blowout" (biasanya perbedaan eksposur/
+# pencahayaan global crop itu VS template putih murni -- BUKAN tinta
+# lokal): _remove_line_noise() pada mask yg sudah nyaris-seluruhnya
+# foreground akan menghapus SEMUANYA (morphological opening dari blok penuh
+# tetap blok penuh, cv2.subtract jadi menghapus tinta asli yg mungkin ada di
+# situ juga) -- hasil pasca-filter 0.0 pada kasus ini TIDAK BOLEH dipercaya
+# sbg "absent". Ambang DIUKUR dari raw-coverage 25 dokumen x 2 field
+# (signature_atasan: distribusi BIMODAL TAJAM -- normal 0.063-0.132, ATAU
+# PERSIS 1.0000 [blowout, 13/25 record], SATU kasus di antara keduanya
+# [record 23, 0.6508, roi_source=fallback/anchor lokal gagal match -- crop
+# parsial, sama-sama tidak bisa dipercaya]; signature_nasabah SETELAH
+# static-mask Finding 3 dikurangi menunjukkan pola SAMA PERSIS -- normal
+# 0.0035-0.224, blowout 0.691-0.736 -- mengonfirmasi blowout ini properti
+# PER-DOKUMEN [pencahayaan area bawah halaman], bukan per-field). 0.50 duduk
+# di celah lebar antara kedua cluster (margin >=0.15 di kedua sisi utk
+# SEMUA record yg diukur) -- lihat handover.md utk detail per-record.
+SIGNATURE_RAW_COVERAGE_BLOWOUT_RATIO = 0.50
+
+# V16 (Section 6) -- profil threshold TERPISAH per field tanda tangan.
+# Default disamakan dgn konstanta lama (SIGNATURE_ABSENT/PRESENT_AREA_RATIO,
+# SIGNATURE_MIN_SPREAD_RATIO) SAMPAI diaudit lewat signature_diagnostics.py
+# (dump ink_area_ratio/spread/component_count 25 dokumen) -- lihat
+# handover.md utk distribusi observasi & justifikasi tiap angka final.
+# JANGAN ubah nilai di sini tanpa data 25-dokumen + inspeksi visual kasus
+# borderline (requirement eksplisit -- tidak boleh angka sembarangan).
+SIGNATURE_THRESHOLDS = {
+    # signature_nasabah -- diaudit 25/25 dokumen (signature_diagnostics.py):
+    # area_ratio TERENDAH 0.104, jauh di atas present_area_ratio (0.012).
+    # SEMUA 25 dokumen genuinely terisi (goresan tanda tangan tangan ATAU
+    # materai/cap -- kotak ini di template.pdf sendiri berlabel "Opsional
+    # materai Rp10.000", jadi keduanya valid), diverifikasi visual record 19
+    # (tanda tangan tinta) & record 7 (materai+cap jempol). TIDAK ADA kasus
+    # borderline di 25 dokumen -- threshold lama TIDAK diubah (tidak ada
+    # bukti utk mengubahnya).
+    "signature_nasabah": {
+        "absent_area_ratio": SIGNATURE_ABSENT_AREA_RATIO,
+        "present_area_ratio": SIGNATURE_PRESENT_AREA_RATIO,
+        "min_spread_ratio": SIGNATURE_MIN_SPREAD_RATIO,
+    },
+    # signature_atasan -- distribusi 25 dokumen BERBEDA nyata dari nasabah:
+    # 14 dokumen area_ratio PERSIS 0.0 (diverifikasi visual record 6, benar2
+    # kosong) + 10 dokumen 0.063-0.132 (diverifikasi visual record 1/3,
+    # goresan tanda tangan genuine) + SATU kasus borderline: record 23,
+    # area_ratio=0.0035 (DI BAWAH absent_area_ratio lama 0.004, jadi
+    # ke-klasifikasi "absent") -- diverifikasi visual, TERNYATA ada goresan
+    # tanda tangan asli (kemungkinan ke-crop sebagian krn roi_source=
+    # "fallback", anchor lokal gagal match utk dokumen ini). absent_area_ratio
+    # diturunkan ke 0.001 (SESUAI rekomendasi kandidat, bukan dipakai sbg
+    # present_area_ratio) KHUSUS utk field ini -- memindahkan record 23 dari
+    # "absent" (salah) ke "uncertain" (jujur: ada tinta tapi bukti tanda
+    # tangan blm cukup meyakinkan), TANPA mengubah 14 kasus kosong-sungguhan
+    # (tetap < 0.001) maupun 10 kasus present (tetap >= 0.012, tidak
+    # tersentuh). present_area_ratio & min_spread_ratio TIDAK diubah -- 10
+    # kasus present sudah jauh di atas keduanya, tidak ada bukti perlu geser.
+    "signature_atasan": {
+        "absent_area_ratio": 0.001,
+        "present_area_ratio": SIGNATURE_PRESENT_AREA_RATIO,
+        "min_spread_ratio": SIGNATURE_MIN_SPREAD_RATIO,
+    },
+}
 
 
 # ============================================================================
@@ -75,6 +139,25 @@ def _strip_label_bleed(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+_OCR_NOISE_WORDS = {"-", "--", "_", ".", "..", "...", ":", ";", "|", "~", "'", '"', "`"}
+
+
+def _clean_field_residue(text, field_type):
+    """V16 (Section 2) -- pembersihan deterministik SETELAH seleksi kandidat
+    spasial (dynamic_extraction sudah memilih baris/token terbaik): buang
+    token residu murni tanda baca/simbol yg tersisa dari OCR (mis. artefak
+    pemisah baris terbaca sbg karakter sendiri) & sisa tanda baca di ujung
+    teks. TIDAK PERNAH mengubah/menebak isi alfanumerik asli -- tidak ada
+    fuzzy-correct thd isian pengguna, field_type hanya dipakai kalau nanti
+    perlu aturan spesifik per tipe (belum ada yg spesifik saat ini selain
+    pembersihan generik di atas)."""
+    if not text:
+        return text
+    words = [w for w in text.split() if w not in _OCR_NOISE_WORDS]
+    cleaned = " ".join(words).strip(" -:;|.")
+    return cleaned or text.strip()
+
+
 def normalize_text(value):
     return re.sub(r"\s+", " ", str(value)).strip() if value else None
 
@@ -118,6 +201,54 @@ def validate_value(value, field_type):
     return len(str(value).strip()) >= 2
 
 
+# V18 Fix 3 -- identity_area (nama_nasabah/nomor_rekening/unit_kerja_
+# pengelola_rekening) content-type sanity gate. Root cause (2 DIFFERENT
+# mechanisms, confirmed via runtime measurement, NOT theory): record 9 --
+# dynamic_extraction's OCR-Primary row-selection picks the neighboring
+# nomor_rekening row's digits for nama_nasabah's window (no per-row content
+# validation exists once a row is chosen). Record 13 -- the ROI-template
+# FALLBACK stage's own OCR correctly captures the real name PLUS leaked
+# nomor_rekening content merged by a colon ("Yech iskamiar : 3758...."), and
+# _strip_label_bleed()'s colon heuristic (built for the common case of a
+# printed LABEL bleeding in before a colon) wrongly discards everything
+# before the colon here, keeping only the digits. Both failure modes land a
+# badly-type-mismatched string in a field build_text_field_result() is about
+# to accept -- neither existing filter (neighbor_labels/_is_static_template_
+# text in dynamic_extraction.py, or validate_value's generic "text" branch
+# above, which accepts ANY 2+ char string) can catch pure-digit-in-text-field
+# content. build_text_field_result() is the ONE function all 4 producing
+# paths (OCR Primary + all 3 fallback stages) funnel through before a value
+# is accepted -- the natural, non-duplicated choke point for this check.
+#
+# Scoped to these 3 fields ONLY (NOT a generic rule on field_type=="text"):
+# rentang_tenor/tempat_tanggal_surat are ALSO type "text" but legitimately
+# digit-heavy (dates, "1/3/6 Bulan") -- a generic digit-ratio rule there
+# would misfire. identity_area is scoped here for the same reason V14/V17
+# scoped _clamp_field_box_y to identity_area only (see handover.md).
+_IDENTITY_TYPE_GATE_FIELDS = {"nama_nasabah", "nomor_rekening", "unit_kerja_pengelola_rekening"}
+
+# Measured this session (raw_results[name]["raw"] via one-record-per-process
+# diagnostic runs, BEFORE this fix): broken cases alpha_ratio 0.000 (record
+# 9, pure digits) / 0.444 (record 13, name+leaked digits merged) vs clean
+# control cases 1.000 (records 1, 12, 14, 22, all genuine names). 0.5 sits
+# with wide margin on both sides of every measured record -- not a guess.
+_TYPE_MISMATCH_REJECT_RATIO = 0.5
+
+
+def _identity_type_mismatch(name, text, field_type):
+    """True if `text` (already cleaned) is badly the WRONG shape for `name`'s
+    declared field_type (numeric field expects digit-dominant, text field
+    expects alpha-dominant) -- see module comment above for the two confirmed
+    real-world cases this catches."""
+    if name not in _IDENTITY_TYPE_GATE_FIELDS or not text:
+        return False
+    digits = sum(c.isdigit() for c in text)
+    alpha = sum(c.isalpha() for c in text)
+    total = max(1, digits + alpha)
+    ratio = (digits / total) if field_type == "numeric" else (alpha / total)
+    return ratio < _TYPE_MISMATCH_REJECT_RATIO
+
+
 def resolve_field_status(raw_text, value, valid, confidence, field_type):
     if not raw_text:
         return "blank" if field_type == "optional_text" else "not_detected"
@@ -138,21 +269,41 @@ def build_out_of_frame_result():
 
 
 def build_text_field_result(name, cfg, ocr_item):
-    """Gabungkan hasil OCR mentah + normalisasi/validasi jadi satu hasil field."""
+    """Gabungkan hasil OCR mentah + normalisasi/validasi jadi satu hasil field.
+
+    V16 (Section 2): "raw" TIDAK PERNAH lagi ditimpa oleh langkah cleaning --
+    tetap teks kandidat TERPILIH apa adanya (bukti mentah dari
+    dynamic_extraction, sudah lolos seleksi spasial tapi belum dibersihkan).
+    "cleaned" (baru) menyimpan hasil setelah strip_terms/label-bleed/residue
+    cleaning, SEBELUM normalize_value tipe-kan jadi "value" akhir. Ketiganya
+    disimpan terpisah (raw/cleaned/value) supaya bukti tidak pernah hilang."""
     if ocr_item is None:
         status = "blank" if cfg["type"] == "optional_text" else "not_detected"
-        return {"value": None, "raw": None, "confidence": None, "status": status}
+        return {"value": None, "raw": None, "cleaned": None, "confidence": None, "status": status}
 
-    raw_text = _strip_terms(ocr_item.get("raw"), cfg.get("strip_terms"))
-    raw_text = _strip_label_bleed(raw_text)
-    value = normalize_value(raw_text, cfg["type"])
+    raw_text = normalize_text(ocr_item.get("raw"))
+    cleaned = _strip_terms(raw_text, cfg.get("strip_terms"))
+    cleaned = _strip_label_bleed(cleaned)
+    cleaned = _clean_field_residue(cleaned, cfg["type"])
+    value = normalize_value(cleaned, cfg["type"])
     valid = validate_value(value, cfg["type"])
     confidence = ocr_item.get("confidence")
-    status = resolve_field_status(raw_text, value, valid, confidence, cfg["type"])
+    status = resolve_field_status(cleaned, value, valid, confidence, cfg["type"])
+    if cleaned and _identity_type_mismatch(name, cleaned, cfg["type"]):
+        # V18 Fix 3 -- lihat komentar _identity_type_mismatch: value SUDAH
+        # ada tapi bentuknya (digit vs huruf) salah utk field ini -- jujur
+        # "not_detected" (memicu fallback chain lanjut mencoba) drpd
+        # menampilkan value yg confidently salah bentuk.
+        status = "not_detected"
+        value = None
     # "valid": dipakai comparison._diagnostic_notes utk bedakan "format value
     # OK tapi confidence rendah" (OCR Kurang Yakin) vs "value gagal terbaca
     # benar" (ROI Bermasalah) -- lihat V11 handover #4.
-    return {"value": value, "raw": raw_text or None, "confidence": confidence, "status": status, "valid": valid}
+    return {
+        "value": value, "raw": raw_text, "cleaned": cleaned or None,
+        "confidence": confidence, "status": status, "valid": valid,
+        "raw_tokens": ocr_item.get("raw_tokens"),
+    }
 
 
 # ============================================================================
@@ -441,17 +592,25 @@ def _connected_ink_stats(mask):
     }
 
 
-def _classify_signature(stats):
+def _classify_signature(stats, name):
     """present / absent / uncertain berdasarkan gabungan area tinta +
-    sebaran (bukan cuma satu ambang change-ratio seperti V7)."""
+    sebaran (bukan cuma satu ambang change-ratio seperti V7). Threshold
+    diambil per-field dari SIGNATURE_THRESHOLDS (Section 6) -- signature_
+    nasabah & signature_atasan bisa punya profil berbeda kalau distribusi
+    25-dokumen terbukti material berbeda (lihat signature_diagnostics.py)."""
+    th = SIGNATURE_THRESHOLDS.get(name, {
+        "absent_area_ratio": SIGNATURE_ABSENT_AREA_RATIO,
+        "present_area_ratio": SIGNATURE_PRESENT_AREA_RATIO,
+        "min_spread_ratio": SIGNATURE_MIN_SPREAD_RATIO,
+    })
     area_ratio = stats["area_ratio"]
     spread = max(stats["spread_x"], stats["spread_y"])
 
-    if stats["components"] == 0 or area_ratio < SIGNATURE_ABSENT_AREA_RATIO:
+    if stats["components"] == 0 or area_ratio < th["absent_area_ratio"]:
         return "absent", "tidak_ada_tinta_signifikan_setelah_noise_filtering"
-    if area_ratio >= SIGNATURE_PRESENT_AREA_RATIO and spread >= SIGNATURE_MIN_SPREAD_RATIO:
+    if area_ratio >= th["present_area_ratio"] and spread >= th["min_spread_ratio"]:
         return "present", "area_dan_sebaran_tinta_konsisten_dgn_tanda_tangan"
-    if area_ratio >= SIGNATURE_PRESENT_AREA_RATIO and spread < SIGNATURE_MIN_SPREAD_RATIO:
+    if area_ratio >= th["present_area_ratio"] and spread < th["min_spread_ratio"]:
         return "uncertain", "area_tinta_cukup_tapi_sebaran_sempit_kemungkinan_noda_bukan_goresan"
     return "uncertain", "area_tinta_di_sekitar_ambang_batas"
 
@@ -478,10 +637,32 @@ def process_signatures(template_img, aligned_img, template_gray, aligned_gray, s
         t_roi = _crop(template_img, template_px)
         f_roi = _crop(aligned_img, target_px)
 
-        mask = _remove_line_noise(difference_mask(t_roi, f_roi))
+        # V17 Finding 3 (Phase A) -- kurangi piksel cetak statis (materai box
+        # signature_nasabah) dari raw mask SEBELUM apa pun lain -- no-op utk
+        # signature_atasan (template-nya blank, lihat signature_static_
+        # content_mask docstring).
+        raw_mask = difference_mask(t_roi, f_roi)
+        static_mask = signature_static_content_mask(template_gray, name, shape)
+        if static_mask.shape != raw_mask.shape:
+            static_mask = cv2.resize(static_mask, (raw_mask.shape[1], raw_mask.shape[0]))
+        raw_mask = cv2.subtract(raw_mask, static_mask)
+        raw_coverage = float(np.count_nonzero(raw_mask) / raw_mask.size) if raw_mask.size else 0.0
+
+        if raw_coverage >= SIGNATURE_RAW_COVERAGE_BLOWOUT_RATIO:
+            # V17 Finding 4 -- raw mask sudah nyaris-total SEBELUM noise-line
+            # filtering -- _remove_line_noise akan menghapus SEMUANYA
+            # (termasuk tinta asli kalau ada), jadi hasil pasca-filter 0.0
+            # TIDAK BOLEH dipercaya sbg "absent". Kembalikan uncertain
+            # langsung (jujur: bukti tidak cukup krn kemungkinan besar
+            # pencahayaan/eksposur, bukan ROI kosong).
+            mask = raw_mask
+            stats = _connected_ink_stats(mask)
+            state, reason = "uncertain", "raw_mask_coverage_hampir_total_kemungkinan_pencahayaan_bukan_kosong"
+        else:
+            mask = _remove_line_noise(raw_mask)
+            stats = _connected_ink_stats(mask)
+            state, reason = _classify_signature(stats, name)
         change_ratio = float(np.count_nonzero(mask) / mask.size) if mask.size else 0.0
-        stats = _connected_ink_stats(mask)
-        state, reason = _classify_signature(stats)
 
         results[name] = {
             "present": state == "present",
@@ -496,6 +677,11 @@ def process_signatures(template_img, aligned_img, template_gray, aligned_gray, s
             "component_count": stats["components"],
             "ink_area_ratio": stats["area_ratio"],
             "ink_spread": max(stats["spread_x"], stats["spread_y"]),
+            # V16 (Section 4) -- spread_x/spread_y TERPISAH (bukan cuma max
+            # gabungan) supaya diagnostik per-record bisa membedakan pola
+            # goresan lebar-horizontal (khas tanda tangan) vs noda satu titik.
+            "ink_spread_x": stats["spread_x"],
+            "ink_spread_y": stats["spread_y"],
             "roi_source": roi_source,
             "roi_bbox": target_px,
             "anchor_similarity": similarity,

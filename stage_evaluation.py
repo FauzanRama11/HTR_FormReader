@@ -100,6 +100,9 @@ import evaluation as ev9   # REUSE V9.2 field normalization/perbandingan
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DEBUG_DIR = BASE_DIR / "stage_evaluation_debug"
+# V18 -- kumpul di eval_runs/ bareng output evaluation.py/signature_
+# diagnostics.py, bukan root project (lihat handover.md §12).
+EVAL_RUNS_DIR = BASE_DIR / "eval_runs"
 
 # ============================================================================
 # CONFIG -- field groups (REUSE definisi produksi, tidak hardcode ulang)
@@ -752,9 +755,10 @@ def main():
     parser.add_argument("--output-json", default=None)
     parser.add_argument("--no-xlsx", action="store_true", help="Lewati output .xlsx (hanya CSV+JSON)")
     args = parser.parse_args()
-    args.output_csv = args.output_csv or str(BASE_DIR / f"stage_evaluation_results_{args.label}.csv")
-    args.output_xlsx = args.output_xlsx or str(BASE_DIR / f"stage_evaluation_results_{args.label}.xlsx")
-    args.output_json = args.output_json or str(BASE_DIR / f"stage_evaluation_summary_{args.label}.json")
+    EVAL_RUNS_DIR.mkdir(exist_ok=True)
+    args.output_csv = args.output_csv or str(EVAL_RUNS_DIR / f"stage_evaluation_results_{args.label}.csv")
+    args.output_xlsx = args.output_xlsx or str(EVAL_RUNS_DIR / f"stage_evaluation_results_{args.label}.xlsx")
+    args.output_json = args.output_json or str(EVAL_RUNS_DIR / f"stage_evaluation_summary_{args.label}.json")
 
     pipeline_module = importlib.import_module(args.pipeline) if args.pipeline != "pipeline" else pipeline
     if args.vlm_fallback is not None and hasattr(pipeline_module, "VLM_FALLBACK_ENABLED"):

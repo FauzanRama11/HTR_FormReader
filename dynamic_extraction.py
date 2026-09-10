@@ -48,7 +48,21 @@ import re
 import cv2
 import ocr
 import preprocessing as prep
-from preprocessing import FIELD_CONFIG
+from preprocessing import FIELD_CONFIG, CHOICE_GROUPS
+
+# V16 -- bentuk alnum token cetak baris PILIHAN choice (mis. "1/3/6" utk
+# tenor, "tunainontunai" utk bentuk reward), DITURUNKAN LANGSUNG dari
+# preprocessing.CHOICE_GROUPS (bukan hardcode "1/3/6"). Baris pilihan ini
+# printed template & vertikal berdekatan dgn field teks di region yg sama
+# (mis. nominal_penempatan bertetangga dgn baris tenor 1/3/6) -- token OCR
+# darinya bisa ikut ke window field lain & lolos filter template-text biasa
+# krn PENDEK (mis. "136" cuma 3 karakter, di bawah ambang panjang minimum
+# _is_static_template_text). Exact-match SAJA (bukan substring) supaya tidak
+# menolak angka asli yg kebetulan mengandung sub-string sama.
+_CHOICE_OPTION_ALNUM = {
+    re.sub(r"[^a-z0-9]", "", "".join(str(opt["label"]) for opt in group["options"].values()).lower())
+    for group in CHOICE_GROUPS.values()
+}
 
 SEARCH_EXPAND_X = 0.025  # fraksi lebar dokumen -- pelebaran window pencarian value
 SEARCH_EXPAND_Y = 0.02   # fraksi tinggi dokumen
@@ -66,6 +80,29 @@ FIELD_REGION_MAP = {
     "reward_non_tunai": ("placement_area", "non tunai"),
     "reward_tunai": ("placement_area", "bentuk reward"),
 }
+
+# V15: field yg window asosiasinya boleh tumbuh ke bawah (lihat
+# _grow_window_downward) -- HANYA reward_tunai, satu-satunya yg terkonfirmasi
+# overflow ke baris ke-2 (terbilang nilai reward sering panjang). JANGAN
+# tambah field lain ke sini tanpa bukti overflow spesifik (nominal_penempatan
+# sempat dicoba, terbukti regresi -- lihat handover.md).
+GROWABLE_FIELDS = {"reward_tunai"}
+
+# V17 Finding 1 -- kalau hasil _clamp_field_box_y() (identity_area, SETELAH
+# dy-aware clamp -- lihat _resolve_field_boxes) MASIH mengecil jadi kurang
+# dari rasio ini thd tinggi template field itu sendiri (norm_bbox_to_px(
+# cfg["value_bbox"], shape), TANPA shift), box dianggap COLLAPSED &
+# di-rescue lewat prep.resolve_roi() per-field sbg jaring pengaman TAMBAHAN
+# (dy-aware clamp sudah menyelesaikan SEMUA 5 kasus collapse yg diuji
+# isolated -- record 9/14/18/6/20 -- lihat handover.md; cabang ini defensive
+# utk kasus di luar sampel itu, mis. dy antar baris genuinely tidak seragam
+# dlm 1 dokumen). Ambang DIUKUR dari baseline 25-dokumen sebelum fix
+# (identity_roi_baseline.csv): rasio TERBURUK yg masih genuinely broken
+# (dikonfirmasi visual, record 9/14/18/6/20) = 0.731 (record 6 nama_nasabah,
+# 19/26px); rasio TERKECIL yg TIDAK pernah dilaporkan bermasalah = 0.782
+# (record 4 nomor_rekening, 18/23px). 0.75 duduk tepat di celah itu (margin
+# ~0.05 di kedua sisi).
+FIELD_BOX_COLLAPSE_RATIO = 0.75
 
 
 # ============================================================================
@@ -132,6 +169,123 @@ def _expand(bbox, scale_w, scale_h, bounds):
     return (max(bx1, x1 - dx), max(by1, y1 - dy), min(bx2, x2 + dx), min(by2, y2 + dy))
 
 
+def _grow_window_downward(target_px, field_name, shape):
+    """V15: perluas sisi BAWAH window asosiasi token field ke bawah (bukan
+    target_px/debug box asli, bukan sisi atas) supaya menangkap baris
+    lanjutan tulisan tangan yg overflow (mis. terbilang panjang "tiga puluh
+    ...tujuh juta lima ratus ribu rupiah" yg ditulis lanjut ke baris ke-2,
+    field aslinya cuma setinggi 1 baris cetak) -- dikonfirmasi via inspeksi
+    debug image: token baris ke-2 sebelumnya SAMA SEKALI tidak ter-assign ke
+    field manapun (di luar window manapun, bukan salah field).
+
+    Pertumbuhan di-cap KERAS ke prep.NEXT_FIELD_TOP_NORM (batas field/choice/
+    tanda tangan LAIN terdekat di bawahnya, sudah dihitung utk SEMUA field --
+    lihat preprocessing._build_next_field_top_map) -- utk identity_area yg
+    gap antar barisnya NOL (lihat V14), ini otomatis membatasi pertumbuhan ke
+    ~0px (aman by construction, tidak perlu exclude identity_area secara
+    eksplisit). Tidak pernah mengubah sisi atas -- growth SEARAH (turun saja),
+    tidak membuka kembali risiko field "naik" ke baris sebelumnya."""
+    x1, y1, x2, y2 = target_px
+    base_h = max(1.0, y2 - y1)
+    extra = base_h * prep.ROI_EXTRA_HEIGHT_RATIO
+    ceiling_norm = prep.NEXT_FIELD_TOP_NORM.get(field_name, 1.0)
+    ceiling_px = ceiling_norm * shape[0] - 2  # margin kecil, jangan sampai sentuh field tetangga
+    grown_y2 = min(y2 + extra, ceiling_px)
+    return (x1, y1, x2, int(round(max(y2, grown_y2))))
+
+
+_PUNCT_ONLY_RE = re.compile(r"^[\W_]+$", re.UNICODE)
+
+
+def _is_noise_token(text):
+    """Token OCR yg cuma tanda baca/simbol murni (mis. artefak pemisah baris
+    yg ke-baca sbg karakter sendiri) -- tidak pernah bagian isian asli."""
+    t = (text or "").strip()
+    return not t or bool(_PUNCT_ONLY_RE.match(t))
+
+
+def _is_static_template_text(text):
+    """V16 (Section 1) -- tolak token yg sebenarnya teks CETAK STATIS template
+    (judul/paragraf, BUKAN label field individual -- itu ditangani terpisah
+    lewat neighbor_labels di pemanggil) sebelum ikut jadi kandidat value.
+    Diturunkan LANGSUNG dari template.pdf (prep.extract_template_static_text,
+    di-cache), TIDAK di-hardcode dari daftar contoh manapun. Token pendek
+    (<4 karakter alnum) dilewati dari cek ini supaya angka/kata pendek yg
+    memang bagian isian asli (mis. potongan nominal) tidak ikut tertolak
+    krn kebetulan cocok potongan kalimat statis."""
+    alnum = re.sub(r"[^a-z0-9]", "", (text or "").lower())
+    if len(alnum) < 4:
+        return False
+    return any(_fuzzy_contains(text, fragment) for fragment in prep.extract_template_static_text())
+
+
+def _cluster_token_rows(tokens):
+    """Kelompokkan token jadi baris berdasarkan overlap vertikal ANTAR TOKEN
+    (bukan kuantisasi kasar relatif tinggi region) -- dua token dianggap SATU
+    baris kalau pusat-y salah satu berada dlm rentang tinggi gabungan baris
+    itu (+toleransi), supaya sedikit miring/naik-turun tulisan tangan tetap
+    tergabung, tapi baris judul/label yg jelas beda tinggi tidak ikut
+    tercampur ke baris value yg sebenarnya."""
+    ordered = sorted(tokens, key=lambda t: t["bbox"][1])
+    rows = []
+    for tok in ordered:
+        y1, y2 = tok["bbox"][1], tok["bbox"][3]
+        cy = (y1 + y2) / 2.0
+        for row in rows:
+            ry1, ry2 = row["y_range"]
+            tol = 0.4 * max(1.0, ry2 - ry1)
+            if ry1 - tol <= cy <= ry2 + tol:
+                row["tokens"].append(tok)
+                row["y_range"] = (min(ry1, y1), max(ry2, y2))
+                break
+        else:
+            rows.append({"tokens": [tok], "y_range": (y1, y2)})
+    return rows
+
+
+def _score_row_group(row, target_px, anchor_target_px, window_px, field_type):
+    """Rangking kandidat baris (Section 1): Y-overlap dgn target_px (same-row),
+    arah yg benar dari label (harus di KANAN anchor cetak), jarak ke pusat
+    target_px, overlap dgn window ROI akhir yg dipakai, kecocokan tipe field
+    (digit-dominan utk numeric/currency, huruf-dominan utk teks), dan
+    confidence rata-rata sbg SATU sinyal tambahan (bukan penentu tunggal --
+    lihat requirement #3, tidak pernah dipakai utk MENOLAK kandidat)."""
+    tx1, ty1, tx2, ty2 = target_px
+    boxes = [t["bbox"] for t in row["tokens"]]
+    gx1 = min(b[0] for b in boxes); gy1 = min(b[1] for b in boxes)
+    gx2 = max(b[2] for b in boxes); gy2 = max(b[3] for b in boxes)
+
+    row_overlap = max(0.0, min(gy2, ty2) - max(gy1, ty1)) / max(1.0, ty2 - ty1)
+
+    ax2 = anchor_target_px[2]
+    direction_ok = 1.0 if gx1 >= ax2 - 4 else 0.0
+
+    tcx, tcy = (tx1 + tx2) / 2.0, (ty1 + ty2) / 2.0
+    gcx, gcy = (gx1 + gx2) / 2.0, (gy1 + gy2) / 2.0
+    win_h = max(1.0, window_px[3] - window_px[1])
+    dist = ((gcx - tcx) ** 2 + (gcy - tcy) ** 2) ** 0.5 / win_h
+
+    wx1, wy1, wx2, wy2 = window_px
+    inter_area = max(0.0, min(gx2, wx2) - max(gx1, wx1)) * max(0.0, min(gy2, wy2) - max(gy1, wy1))
+    group_area = max(1.0, (gx2 - gx1) * (gy2 - gy1))
+    roi_overlap = inter_area / group_area
+
+    text = "".join(t.get("text", "") for t in row["tokens"])
+    digits = sum(c.isdigit() for c in text)
+    alpha = sum(c.isalpha() for c in text)
+    total = max(1, digits + alpha)
+    type_score = (digits / total) if field_type in ("numeric", "currency") else (alpha / total)
+
+    confs = [t["confidence"] for t in row["tokens"] if t.get("confidence") is not None]
+    conf_score = (sum(confs) / len(confs)) if confs else 0.5
+
+    score = (
+        3.0 * row_overlap + 1.5 * direction_ok + 2.0 * roi_overlap
+        + 1.0 * type_score + 0.3 * conf_score - 1.0 * dist
+    )
+    return score
+
+
 def _fuzzy_contains(token_text, label):
     t = re.sub(r"[^a-z]", "", (token_text or "").lower())
     l = re.sub(r"[^a-z]", "", label.lower())
@@ -168,9 +322,18 @@ def _resolve_section_transforms(template_gray, aligned_gray, shape):
     dari BEBERAPA anchor cetak sekaligus (lihat preprocessing.
     estimate_section_transform) -- menggantikan koreksi dx/dy independen per
     field sebagai sumber koreksi UTAMA. Return dict region_name -> transform
-    diagnostik (termasuk 'M' atau None)."""
+    diagnostik (termasuk 'M' atau None).
+
+    V15.1: anchor judul (prep.TITLE_ANCHOR_ENTRY) SELALU dicocokkan sbg
+    cross-check independen (bukan digabung ke anchor field) -- section_bbox_norm
+    (SEMANTIC_REGIONS_NORM) diteruskan supaya cross-check-nya pakai overlap
+    geometris (V15.1-b), bukan jarak translasi polos (terbukti tidak cukup
+    diskriminatif, lihat update.md). Lihat preprocessing.estimate_section_transform."""
     return {
-        region_name: prep.estimate_section_transform(template_gray, aligned_gray, shape, anchor_bboxes)
+        region_name: prep.estimate_section_transform(
+            template_gray, aligned_gray, shape, anchor_bboxes, title_anchor=prep.TITLE_ANCHOR_ENTRY,
+            section_bbox_norm=prep.SEMANTIC_REGIONS_NORM.get(region_name)
+        )
         for region_name, anchor_bboxes in prep.SECTION_ANCHOR_BBOXES.items()
     }
 
@@ -201,7 +364,40 @@ def _resolve_field_boxes(template_gray, aligned_gray, shape, section_transforms)
         # choice box yang overlap) -- root cause yang terverifikasi (lihat
         # handover.md) memang spesifik di sini.
         if region_name == "identity_area":
-            target_px = prep._clamp_field_box_y(target_px, field_name, shape)
+            # V17 Finding 1 -- batas tetangga (PREV_FIELD_BOTTOM_NORM/
+            # NEXT_FIELD_TOP_NORM, koordinat TEMPLATE tanpa shift) HARUS
+            # digeser sejauh dy YANG SAMA dgn box field ini sendiri SEBELUM
+            # di-clamp -- lihat prep._clamp_field_box_y docstring utk root
+            # cause lengkap (TERVERIFIKASI via debug empirik, BUKAN teori):
+            # section transform (consensus_translation/section_affine) BISA
+            # menggeser satu baris beberapa piksel scr SAH, tapi batas
+            # statis lama TIDAK ikut bergeser -> box yg SUDAH BENAR malah
+            # ke-clip. RENCANA AWAL (rescue via prep.resolve_roi per-field,
+            # TANPA dy-aware clamp) TERBUKTI TIDAK CUKUP saat diuji isolated
+            # (record 9/14/18): anchor lokal field itu SENDIRI menghitung
+            # dx/dy PERSIS SAMA dgn section transform pada 4/5 kasus yg
+            # diuji -- BUKAN evidence independen spt diasumsikan, keduanya
+            # menemukan pergeseran GENUINE yg sama, jadi rescue lama
+            # ke-clamp dgn cara & hasil yg SAMA (collapse tidak hilang).
+            raw_dy = target_px[1] - template_px[1]
+            target_px = prep._clamp_field_box_y(target_px, field_name, shape, dy=raw_dy)
+            # Defensive fallback (jarang aktif stlh dy-aware clamp di atas,
+            # tapi tetap dipertahankan sbg jaring pengaman tambahan): kalau
+            # MASIH collapse (mis. dy antar baris genuinely tidak seragam
+            # dlm 1 dokumen), rescue lewat resolve_roi per-field (V9.x,
+            # anchor lokal sendiri), clamp ULANG pakai dy hasil rescue-nya
+            # sendiri (BUKAN dy lama yg sudah terbukti tidak relevan lagi
+            # kalau resolve_roi menemukan offset berbeda).
+            template_h = max(1.0, template_px[3] - template_px[1])
+            clamped_h = target_px[3] - target_px[1]
+            if clamped_h / template_h < FIELD_BOX_COLLAPSE_RATIO:
+                _, rescued_px, rescue_source, rescue_evidence = prep.resolve_roi(
+                    template_gray, aligned_gray, cfg, shape
+                )
+                rescued_dy = rescued_px[1] - template_px[1]
+                target_px = prep._clamp_field_box_y(rescued_px, field_name, shape, dy=rescued_dy)
+                source = f"identity_collapse_rescue_{rescue_source}"
+                evidence = rescue_evidence
         dx = target_px[0] - template_px[0]
         dy = target_px[1] - template_px[1]
         anchor_template_px = prep.norm_bbox_to_px(cfg["anchor_bbox"], shape)
@@ -327,32 +523,81 @@ def extract_dynamic_fields(aligned_img, template_gray, aligned_gray, shape, cove
 
         rbbox = active_region_bbox[region_name]
         rw, rh = rbbox[2] - rbbox[0], rbbox[3] - rbbox[1]
-        wx1, wy1, wx2, wy2 = _expand(fb["target_px"], rw, rh, rbbox)
+        # V15: growth dibatasi ke field yg TERKONFIRMASI overflow ke baris ke-2
+        # (reward_tunai -- terbilang nilai reward sering panjang, lihat
+        # docstring _grow_window_downward). SEMPAT dicoba ke semua 7 field,
+        # TERBUKTI regresi nominal_penempatan (field angka 1 baris, tidak
+        # overflow -- growth-nya cuma menambah risiko menangkap token yg
+        # bukan miliknya tanpa manfaat nyata). Jangan diperluas lagi ke field
+        # lain tanpa bukti overflow spesifik spt ini.
+        if field_name in GROWABLE_FIELDS:
+            target_for_window = _grow_window_downward(fb["target_px"], field_name, shape)
+            roi_boxes[field_name] = target_for_window  # debug box jujur menampilkan window yg sebenarnya dipakai
+        else:
+            target_for_window = fb["target_px"]
+        wx1, wy1, wx2, wy2 = _expand(target_for_window, rw, rh, rbbox)
 
-        picked = []
+        # V16 (Section 1) -- best-candidate spatial assignment, bukan lagi
+        # "kumpulkan semua token dlm window & gabung apa adanya". Tiga
+        # penolakan dulu (label sendiri -- SAMA seperti sebelumnya; label
+        # field TETANGGA di region yg sama; teks cetak statis template dari
+        # template.pdf), baru sisanya dikelompokkan jadi baris & baris
+        # TERBAIK yg dipilih (bukan seluruh window) -- lihat _score_row_group.
+        neighbor_labels = [
+            other_label for other_name, (other_region, other_label) in FIELD_REGION_MAP.items()
+            if other_region == region_name and other_name != field_name
+        ]
+
+        candidates, raw_token_texts = [], []
         for tok in tokens:
             text = tok.get("text") or ""
             if _fuzzy_contains(text, label):
                 remainder = _strip_label_remainder(text, label)
                 if remainder:
-                    picked.append({**tok, "text": remainder})
-                continue  # token label cetak murni (tanpa sisa) -- lewati
+                    candidates.append({**tok, "text": remainder})
+                continue  # token label cetak murni (tanpa sisa) -- lewati, SAMA spt sebelumnya
             tcx, tcy = _bbox_center(tok["bbox"])
-            if wx1 <= tcx <= wx2 and wy1 <= tcy <= wy2:
-                picked.append(tok)
+            if not (wx1 <= tcx <= wx2 and wy1 <= tcy <= wy2):
+                continue
+            raw_token_texts.append(text)  # bukti mentah SEMUA token dlm window, SEBELUM filter di bawah
+            if _is_noise_token(text):
+                continue
+            if any(_fuzzy_contains(text, nb) for nb in neighbor_labels):
+                continue  # label field TETANGGA yg ikut ke-window (leakage antar field) -- lewati
+            if _is_static_template_text(text):
+                continue  # teks cetak statis (judul/paragraf template) -- lewati
+            if re.sub(r"[^a-z0-9]", "", text.lower()) in _CHOICE_OPTION_ALNUM:
+                continue  # baris pilihan choice cetak (mis. "1/3/6") -- lewati, lihat _CHOICE_OPTION_ALNUM
+            candidates.append(tok)
 
-        if not picked:
+        if not candidates:
             continue
 
-        region_y0 = active_region_bbox[region_name][1]
-        region_h = max(1, active_region_bbox[region_name][3] - region_y0)
-        # reading order: baris (dikuantisasi relatif thd region) dulu, lalu kiri->kanan
-        picked.sort(key=lambda t: (round((t["bbox"][1] - region_y0) / region_h * 40), t["bbox"][0]))
-        text = " ".join(t.get("text", "") for t in picked if t.get("text")).strip()
-        confs = [t["confidence"] for t in picked if t.get("confidence") is not None]
+        if field_name in GROWABLE_FIELDS:
+            # Field ini SUDAH terkonfirmasi overflow ke baris ke-2 (lihat
+            # docstring GROWABLE_FIELDS) -- SEMUA baris dlm window (setelah
+            # filtering di atas) tetap digabung apa adanya (bukan single-
+            # best-row) supaya baris lanjutan terbilang tidak hilang.
+            ordered = sorted(
+                candidates,
+                key=lambda t: (round((t["bbox"][1] - wy1) / max(1.0, wy2 - wy1) * 10), t["bbox"][0]),
+            )
+        else:
+            rows = _cluster_token_rows(candidates)
+            best_row = max(
+                rows,
+                key=lambda r: _score_row_group(
+                    r, fb["target_px"], fb["anchor_target_px"], (wx1, wy1, wx2, wy2),
+                    FIELD_CONFIG[field_name]["type"],
+                ),
+            )
+            ordered = sorted(best_row["tokens"], key=lambda t: t["bbox"][0])
+
+        text = " ".join(t.get("text", "") for t in ordered if t.get("text")).strip()
+        confs = [t["confidence"] for t in ordered if t.get("confidence") is not None]
         confidence = min(confs) if confs else None
         if text:
-            result[field_name] = {"raw": text, "confidence": confidence}
+            result[field_name] = {"raw": text, "confidence": confidence, "raw_tokens": raw_token_texts}
 
     regions_debug = {
         region_name: {

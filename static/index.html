@@ -112,6 +112,8 @@
   .btn-run { background: #2563eb; }
   .btn-check { background: #16a34a; }
   .btn-rerun { background: #d97706; }
+  .btn-stop { background: #dc2626; }
+  .btn-stop:disabled { background: #999; }
   .action-cell { min-width: 150px; white-space: nowrap; }
   .fail-reason { color: #b91c1c; font-size: 11px; }
 
@@ -216,6 +218,7 @@
     .overview-rules { grid-template-columns: 1fr; }
     .workspace-heading { padding: 14px; }
     .overview-content, .record-content { padding: 12px; }
+    .preview-section { flex-direction: column; }
   }
 
   .progress-section {
@@ -364,14 +367,17 @@
     <ol class="progress-steps" id="progressSteps"></ol>
   </div>
 
-  <div class="preview-section" id="previewSection" style="display:none;">
-    <div class="preview-col">
-      <h3>Template</h3>
-      <div class="preview-box" id="templateBox"><div class="preview-placeholder">Memuat template...</div></div>
-    </div>
-    <div class="preview-col">
-      <h3>Dokumen Diupload</h3>
-      <div class="preview-box" id="uploadedBox"><div class="preview-placeholder">Memuat preview...</div></div>
+  <div class="table-section" id="previewSection" style="display:none;">
+    <h3>Proses Dokumen</h3>
+    <div class="preview-section">
+      <div class="preview-col">
+        <h3>Original</h3>
+        <div class="preview-box" id="fileOriginalBox"><div class="preview-placeholder">Memuat preview...</div></div>
+      </div>
+      <div class="preview-col">
+        <h3>Preprocessed</h3>
+        <div class="preview-box" id="filePreprocessedBox"><div class="preview-placeholder">-</div></div>
+      </div>
     </div>
   </div>
 
@@ -390,13 +396,19 @@
   </details>
 
   <div class="table-section" id="roiSection" style="display:none;">
-    <h3>Perbandingan ROI (Debug)</h3>
+    <h3>Validasi ROI</h3>
     <p style="font-size:12px;color:#6b7280;margin:0 0 8px;">
-      Kotak biru = area ROI pada template. Pada dokumen: hijau = terbaca, oranye = perlu dicek, abu = kosong, merah = gagal.
+      Hijau = terbaca, oranye = perlu dicek, abu = kosong, merah = gagal.
     </p>
-    <div class="preview-section" style="display:flex;">
-      <div class="preview-col"><h3>Template (ROI)</h3><div class="preview-box" id="roiTemplateBox"><div class="preview-placeholder">-</div></div></div>
-      <div class="preview-col"><h3>Dokumen Diupload (ROI)</h3><div class="preview-box" id="roiDocumentBox"><div class="preview-placeholder">-</div></div></div>
+    <div class="preview-section">
+      <div class="preview-col">
+        <h3>Template ROI</h3>
+        <div class="preview-box" id="fileTemplateRoiBox"><div class="preview-placeholder">-</div></div>
+      </div>
+      <div class="preview-col">
+        <h3>Final Document ROI</h3>
+        <div class="preview-box" id="fileRoiDocumentBox"><div class="preview-placeholder">-</div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -423,7 +435,7 @@
         <div class="workspace-heading">
           <h3 id="summaryOverviewHeading">Summary and Overview</h3>
         </div>
-        <div class="overview-content">
+        <div class="overview-content"> 
           <div class="overview-stats">
             <div class="overview-stat">
               <span class="overview-stat-label">Loaded Records</span>
@@ -462,6 +474,9 @@
               <button id="sheetBulkRunBtn" class="btn-sm">Jalankan yang Dicentang</button>
             </div>
             <div class="toolbar-group">
+              <button id="sheetStopBtn" class="btn-sm btn-stop" disabled>Stop</button>
+            </div>
+            <div class="toolbar-group">
               <button id="sheetExportBtn" class="btn-sm">Export Excel</button>
             </div>
             <div class="toolbar-group">
@@ -492,25 +507,27 @@
 
   <!-- Detail record: layout sama seperti Tab 1 -->
   <div id="sheetDetail" style="display:none;">
-    <hr style="margin:24px 0;">
-    <h3 id="sheetDetailTitle">Detail Record</h3>
-    <div id="sheetDetailMessage"></div>
-
     <div class="progress-section" id="sheetProgressSection">
       <div class="progress-header"><strong>Status Proses</strong><span id="sheetProgressPercent">0%</span></div>
       <div class="progress-track"><div class="progress-bar" id="sheetProgressBar"></div></div>
       <div class="progress-message" id="sheetProgressMessage">Menunggu proses...</div>
       <ol class="progress-steps" id="sheetProgressSteps"></ol>
     </div>
+    <div class="table-section">
+      <hr style="margin:24px 0;">
+      <h3 id="sheetDetailTitle">Detail Record</h3>
+      <div id="sheetDetailMessage"></div>
 
-    <div class="preview-section">
-      <div class="preview-col">
-        <h3>Template</h3>
-        <div class="preview-box" id="sheetTemplateBox"><div class="preview-placeholder">-</div></div>
-      </div>
-      <div class="preview-col">
-        <h3>Dokumen (Drive)</h3>
-        <div class="preview-box" id="sheetUploadedBox"><div class="preview-placeholder">-</div></div>
+      <h3>Proses Dokumen</h3>
+      <div class="preview-section">
+        <div class="preview-col">
+          <h3>Original</h3>
+          <div class="preview-box" id="sheetOriginalBox"><div class="preview-placeholder">-</div></div>
+        </div>
+        <div class="preview-col">
+          <h3>Preprocessed</h3>
+          <div class="preview-box" id="sheetPreprocessedBox"><div class="preview-placeholder">-</div></div>
+        </div>
       </div>
     </div>
 
@@ -528,18 +545,24 @@
       </table>
     </div>
 
+    <div class="table-section" id="sheetRoiSection" style="display:none;">
+      <h3>Validasi ROI</h3>
+      <div class="preview-section">
+        <div class="preview-col">
+          <h3>Template ROI</h3>
+          <div class="preview-box" id="sheetTemplateRoiBox"><div class="preview-placeholder">-</div></div>
+        </div>
+        <div class="preview-col">
+          <h3>Final Document ROI</h3>
+          <div class="preview-box" id="sheetRoiDocumentBox"><div class="preview-placeholder">-</div></div>
+        </div>
+      </div>
+    </div>
+
     <details id="sheetJsonDetails" style="display:none;">
       <summary>Raw Structured JSON (untuk debugging)</summary>
       <pre id="sheetJsonOutput"></pre>
     </details>
-
-    <div class="table-section" id="sheetRoiSection" style="display:none;">
-      <h3>Perbandingan ROI (Debug)</h3>
-      <div class="preview-section" style="display:flex;">
-        <div class="preview-col"><h3>Template (ROI)</h3><div class="preview-box" id="sheetRoiTemplateBox"><div class="preview-placeholder">-</div></div></div>
-        <div class="preview-col"><h3>Dokumen (ROI)</h3><div class="preview-box" id="sheetRoiDocumentBox"><div class="preview-placeholder">-</div></div></div>
-      </div>
-    </div>
   </div>
 </div>
 
@@ -651,21 +674,48 @@ function renderFieldsTable(tbody, fields, withDataEntry) {
 }
 
 // ============================================================================
+// PREVIEW HELPERS (dipakai Tab 1 & Tab 2) -- render graceful: placeholder
+// selagi URL belum ada, gambar HANYA dipasang ke DOM setelah berhasil
+// dimuat (supaya tidak pernah muncul ikon broken-image), placeholder lain
+// kalau gagal load. Frontend hanya menampilkan URL yang sudah dikirim
+// backend -- tidak pernah membuat file gambar baru dari JS.
+// ============================================================================
+function setPreviewImage(box, url, altText, emptyText) {
+  if (!box) return;
+  if (!url) {
+    box.innerHTML = `<div class="preview-placeholder">${emptyText || "Belum tersedia"}</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="preview-placeholder">Memuat gambar...</div>`;
+  const img = new Image();
+  img.alt = altText || "";
+  img.onload = () => { box.innerHTML = ""; box.appendChild(img); };
+  img.onerror = () => { box.innerHTML = `<div class="preview-placeholder">Gagal memuat gambar</div>`; };
+  img.src = url;
+}
+
+// Bersihkan semua box preview (mis. sebelum memuat record/dokumen baru)
+// supaya gambar record sebelumnya tidak pernah nyangkut kelihatan.
+function clearPreviewBoxes(boxes, loadingText) {
+  boxes.forEach((box) => { if (box) box.innerHTML = `<div class="preview-placeholder">${loadingText || "Memuat..."}</div>`; });
+}
+
+// ============================================================================
 // TAB 1: PDF / IMAGE
 // ============================================================================
 const fileInput = document.getElementById("fileInput");
 const processBtn = document.getElementById("processBtn");
 const messageBox = document.getElementById("message");
 const previewSection = document.getElementById("previewSection");
-const templateBox = document.getElementById("templateBox");
-const uploadedBox = document.getElementById("uploadedBox");
+const fileOriginalBox = document.getElementById("fileOriginalBox");
+const filePreprocessedBox = document.getElementById("filePreprocessedBox");
 const tableSection = document.getElementById("tableSection");
 const resultBody = document.getElementById("resultBody");
 const jsonDetails = document.getElementById("jsonDetails");
 const jsonOutput = document.getElementById("jsonOutput");
 const roiSection = document.getElementById("roiSection");
-const roiTemplateBox = document.getElementById("roiTemplateBox");
-const roiDocumentBox = document.getElementById("roiDocumentBox");
+const fileTemplateRoiBox = document.getElementById("fileTemplateRoiBox");
+const fileRoiDocumentBox = document.getElementById("fileRoiDocumentBox");
 
 const fileProgress = makeProgressController({
   section: document.getElementById("progressSection"),
@@ -674,18 +724,6 @@ const fileProgress = makeProgressController({
   message: document.getElementById("progressMessage"),
   steps: document.getElementById("progressSteps"),
 });
-
-loadTemplatePreview(templateBox);
-
-async function loadTemplatePreview(box) {
-  try {
-    const res = await fetch("/api/template-preview");
-    const data = await res.json();
-    box.innerHTML = res.ok ? `<img src="${data.preview_url}" alt="template">` : `<div class="preview-placeholder">Gagal memuat template</div>`;
-  } catch {
-    box.innerHTML = `<div class="preview-placeholder">Gagal memuat template</div>`;
-  }
-}
 
 function showLoadingRow(tbody, colspan, text) {
   tbody.innerHTML = `<tr class="loading-row"><td colspan="${colspan}">${text}</td></tr>`;
@@ -698,11 +736,11 @@ processBtn.addEventListener("click", async () => {
   processBtn.disabled = true;
   messageBox.textContent = "";
   fileProgress.reset("Mengupload dokumen...");
-  previewSection.style.display = "flex";
+  previewSection.style.display = "block";
   tableSection.style.display = "block";
   jsonDetails.style.display = "none";
   roiSection.style.display = "none";
-  uploadedBox.innerHTML = `<div class="preview-placeholder">Mengupload...</div>`;
+  clearPreviewBoxes([fileOriginalBox, filePreprocessedBox, fileTemplateRoiBox, fileRoiDocumentBox], "Mengupload...");
   showLoadingRow(resultBody, 4, "Menunggu proses OCR selesai...");
 
   const formData = new FormData();
@@ -713,11 +751,13 @@ processBtn.addEventListener("click", async () => {
     const uploadData = await uploadRes.json();
     if (!uploadRes.ok) {
       messageBox.innerHTML = `<div class="error-box">${uploadData.error || "Gagal upload"}</div>`;
-      processBtn.disabled = false;
       return;
     }
 
-    uploadedBox.innerHTML = `<img src="${uploadData.preview_url}" alt="uploaded document">`;
+    // Preview awal (dokumen asli) sudah tersedia begitu upload selesai --
+    // ditampilkan lebih dulu, nanti ditimpa dengan original_url dari hasil
+    // pipeline (gambar sama, sumber kanonik) setelah OCR selesai.
+    setPreviewImage(fileOriginalBox, uploadData.preview_url, "dokumen asli");
     messageBox.textContent = "Dokumen terupload. Menjalankan OCR...";
     fileProgress.poll(uploadData.request_id);
 
@@ -728,6 +768,9 @@ processBtn.addEventListener("click", async () => {
       fileProgress.stop();
       showLoadingRow(resultBody, 4, "Gagal memproses OCR.");
       messageBox.innerHTML = `<div class="error-box">${processData.error || "Terjadi kesalahan"}\n${processData.detail || ""}</div>`;
+      setPreviewImage(filePreprocessedBox, null, "", "Tidak tersedia (proses gagal)");
+      setPreviewImage(fileTemplateRoiBox, null, "", "Tidak tersedia (proses gagal)");
+      setPreviewImage(fileRoiDocumentBox, null, "", "Tidak tersedia (proses gagal)");
       return;
     }
 
@@ -741,9 +784,11 @@ processBtn.addEventListener("click", async () => {
     jsonOutput.textContent = JSON.stringify(processData.raw_json, null, 2);
     jsonDetails.style.display = "block";
 
-    if (processData.roi_template_url && processData.roi_document_url) {
-      roiTemplateBox.innerHTML = `<img src="${processData.roi_template_url}" alt="roi template">`;
-      roiDocumentBox.innerHTML = `<img src="${processData.roi_document_url}" alt="roi document">`;
+    setPreviewImage(fileOriginalBox, processData.original_url, "dokumen asli");
+    setPreviewImage(filePreprocessedBox, processData.preprocessed_url, "dokumen preprocessed");
+    if (processData.roi_document_url) {
+      setPreviewImage(fileTemplateRoiBox, processData.template_roi_url, "template roi");
+      setPreviewImage(fileRoiDocumentBox, processData.roi_document_url, "roi document");
       roiSection.style.display = "block";
     }
     messageBox.textContent = "Selesai diproses.";
@@ -751,6 +796,9 @@ processBtn.addEventListener("click", async () => {
     fileProgress.stop();
     showLoadingRow(resultBody, 4, "Gagal memproses.");
     messageBox.innerHTML = `<div class="error-box">Gagal menghubungi server: ${err}</div>`;
+    setPreviewImage(filePreprocessedBox, null, "", "Tidak tersedia (proses gagal)");
+    setPreviewImage(fileTemplateRoiBox, null, "", "Tidak tersedia (proses gagal)");
+    setPreviewImage(fileRoiDocumentBox, null, "", "Tidak tersedia (proses gagal)");
   } finally {
     processBtn.disabled = false;
   }
@@ -773,6 +821,7 @@ const sheetTableBody = document.getElementById("sheetTableBody");
 const sheetSelectorInput = document.getElementById("sheetSelectorInput");
 const sheetSubmitBtn = document.getElementById("sheetSubmitBtn");
 const sheetBulkRunBtn = document.getElementById("sheetBulkRunBtn");
+const sheetStopBtn = document.getElementById("sheetStopBtn");
 const sheetExportBtn = document.getElementById("sheetExportBtn");
 const sheetSearchInput = document.getElementById("sheetSearchInput");
 const pageSizeSelect = document.getElementById("pageSizeSelect");
@@ -787,14 +836,14 @@ const sheetDetail = document.getElementById("sheetDetail");
 const sheetDetailTitle = document.getElementById("sheetDetailTitle");
 const sheetDetailFinalStatus = document.getElementById("sheetDetailFinalStatus");
 const sheetDetailMessage = document.getElementById("sheetDetailMessage");
-const sheetTemplateBox = document.getElementById("sheetTemplateBox");
-const sheetUploadedBox = document.getElementById("sheetUploadedBox");
+const sheetOriginalBox = document.getElementById("sheetOriginalBox");
+const sheetPreprocessedBox = document.getElementById("sheetPreprocessedBox");
+const sheetTemplateRoiBox = document.getElementById("sheetTemplateRoiBox");
 const sheetResultBody = document.getElementById("sheetResultBody");
 const sheetFieldSummary = document.getElementById("sheetFieldSummary");
 const sheetJsonDetails = document.getElementById("sheetJsonDetails");
 const sheetJsonOutput = document.getElementById("sheetJsonOutput");
 const sheetRoiSection = document.getElementById("sheetRoiSection");
-const sheetRoiTemplateBox = document.getElementById("sheetRoiTemplateBox");
 const sheetRoiDocumentBox = document.getElementById("sheetRoiDocumentBox");
 
 const sheetProgress = makeProgressController({
@@ -1310,25 +1359,25 @@ function statusCellHtml(recordNo) {
     <div class="${noteClass}">${note}</div>`;
 }
 
-// --- Sel kolom Action: tombol berubah sesuai status. Selama isRunLocked() aktif,
-// semua tombol run/rerun/lihat DIKUNCI kecuali milik record yang sedang berjalan. ---
+// --- Sel kolom Action: tombol berubah sesuai status. Disabled/enabled utk
+// tombol run/rerun (data-action="run") TIDAK dibakukan di sini -- itu satu-
+// satunya tanggung jawab setProcessingState(), dipanggil setelah render/
+// refresh manapun, supaya tidak ada dua sumber kebenaran utk state disabled.
+// "Lihat" (data-action="check") HARUS tetap bisa dipakai walau proses lain
+// sedang berjalan -- tidak pernah dikunci oleh setProcessingState(). ---
 function actionCellHtml(recordNo) {
   const status = batchStatus[recordNo] || "pending";
   if (status === "queued" || status === "processing") {
     return `<button class="btn-sm" disabled>Diproses…</button>`;
   }
-  const locked = isRunLocked();
-  const lockAttr = locked ? "disabled" : "";
   if (status === "done") {
-    // "Lihat" HARUS tetap bisa dipakai walau proses lain sedang berjalan -- hanya
-    // tombol yang MEMICU proses baru (run/rerun) yang dikunci lewat lockAttr.
     return `<button class="btn-sm btn-check" data-action="check" data-record="${recordNo}">Lihat</button>`
-         + `<button class="btn-sm btn-rerun" data-action="run" data-record="${recordNo}" ${lockAttr}>Run Ulang</button>`;
+         + `<button class="btn-sm btn-rerun" data-action="run" data-record="${recordNo}">Run Ulang</button>`;
   }
   if (status === "error" || status === "no_document") {
-    return `<button class="btn-sm btn-rerun" data-action="run" data-record="${recordNo}" ${lockAttr}>Ulangi</button>`;
+    return `<button class="btn-sm btn-rerun" data-action="run" data-record="${recordNo}">Ulangi</button>`;
   }
-  return `<button class="btn-sm btn-run" data-action="run" data-record="${recordNo}" ${lockAttr}>Run</button>`;
+  return `<button class="btn-sm btn-run" data-action="run" data-record="${recordNo}">Run</button>`;
 }
 
 function docLinkHtml(value) {
@@ -1388,17 +1437,19 @@ function renderSheetTable() {
 
   if (currentPage > totalPages()) currentPage = totalPages();
 
-  const locked = isRunLocked();
-  sheetTableHead.innerHTML = `<th><input type="checkbox" id="checkAllBox" ${locked ? "disabled" : ""}></th><th>Index</th>`
+  // NB: checkbox/tombol run TIDAK diberi atribut disabled di sini -- baris
+  // baru selalu dirender dalam keadaan enabled, lalu setProcessingState()
+  // (dipanggil di akhir fungsi ini lewat updateCheckedCount()) yang jadi
+  // SATU-SATUNYA tempat yang menentukan disabled/enabled. Ini yang mencegah
+  // bug lama: checkbox record yang sudah pernah diproses/dibatalkan/gagal
+  // permanen ter-disable walau proses lain sudah selesai/dihentikan.
+  sheetTableHead.innerHTML = `<th><input type="checkbox" id="checkAllBox"></th><th>Index</th>`
     + DATA_COLUMNS.map((c) => `<th>${DATA_COLUMN_LABELS[c] || c}</th>`).join("")
     + `<th class="cell-status">Status Proses</th><th>Action</th><th>Final Status</th><th>Notes</th>`;
 
   sheetTableBody.innerHTML = "";
   getPageRecords().forEach((record) => {
     const no = record.Record;
-    const status = batchStatus[no] || "pending";
-    // Sudah pernah dijalankan (bukan pending) -> tidak bisa dicentang lagi utk bulk run.
-    const checkDisabled = locked || status !== "pending";
     const tr = document.createElement("tr");
     tr.className = "record-row";
     tr.dataset.recordNo = no;
@@ -1412,7 +1463,7 @@ function renderSheetTable() {
       return `<td>${(v === undefined || v === null || v === "") ? "-" : v}</td>`;
     }).join("");
     tr.innerHTML = `
-      <td><input type="checkbox" class="row-check" data-record="${no}" ${checkedRecords.has(String(no)) ? "checked" : ""} ${checkDisabled ? "disabled" : ""}></td>
+      <td><input type="checkbox" class="row-check" data-record="${no}" ${checkedRecords.has(String(no)) ? "checked" : ""}></td>
       <td>${no}</td>
       ${dataCells}
       <td class="status-cell cell-status">${statusCellHtml(no)}</td>
@@ -1426,7 +1477,6 @@ function renderSheetTable() {
   renderTailInfo();
   renderPagination();
   updateCheckedCount();
-  applyToolbarLock();
   // Final Status yang masih generic diperkaya dari hasil tersimpan, tanpa OCR ulang.
   setTimeout(() => {
     getPageRecords().forEach((r) => {
@@ -1436,13 +1486,25 @@ function renderSheetTable() {
   }, 0);
 }
 
-// Kunci tombol pemicu run lain (bulk & index/range) selama isRunLocked() aktif,
-// supaya proses manual per-record yang sedang berjalan tidak ikut terpengaruh.
-function applyToolbarLock() {
-  const locked = isRunLocked();
-  sheetBulkRunBtn.disabled = locked || checkedRecords.size === 0;
-  sheetSubmitBtn.disabled = locked;
-  sheetSelectorInput.disabled = locked;
+// ============================================================================
+// SATU titik kontrol utk semua kontrol yang boleh berubah selama batch
+// berjalan: checkbox baris, checkbox "semua", tombol Run/Rerun/Ulangi per
+// baris, Bulk Run, Index/Range Run, dan Stop. Dipanggil ulang di setiap
+// render/refresh (renderSheetTable, updateStatusCells, submit run, klik
+// Stop, tiap tick polling, dan lewat try/finally di semua jalur error) --
+// TIDAK ADA tempat lain yang boleh men-set `.disabled` pada kontrol ini.
+// Akibatnya begitu isProcessing=false, SEMUA kontrol otomatis kembali ke
+// keadaan normal -- tidak ada record yang bisa nyangkut ter-disable
+// permanen hanya karena pernah diproses/dibatalkan/gagal.
+// ============================================================================
+function setProcessingState(isProcessing, cancelPending) {
+  sheetStopBtn.disabled = !isProcessing || !!cancelPending;
+  sheetBulkRunBtn.disabled = isProcessing || checkedRecords.size === 0;
+  sheetSubmitBtn.disabled = isProcessing;
+  sheetSelectorInput.disabled = isProcessing;
+  document.querySelectorAll("#sheetTableBody .row-check").forEach((cb) => { cb.disabled = isProcessing; });
+  document.querySelectorAll("#sheetTableBody button[data-action='run']").forEach((btn) => { btn.disabled = isProcessing; });
+  syncCheckAllBoxState(isProcessing);
 }
 
 function renderTailInfo() {
@@ -1471,22 +1533,21 @@ function renderPagination() {
 
 function updateCheckedCount() {
   checkedCountEl.textContent = checkedRecords.size;
-  syncCheckAllBoxState();
-  applyToolbarLock();
+  setProcessingState(isRunLocked());
 }
 
 // Sinkronkan checked/unchecked/indeterminate checkbox "Select All" dengan
 // state checkedRecords utk HALAMAN YANG SEDANG TAMPIL saja (Select All =
 // per halaman; hanya aksi UNCHECK yang sengaja global lintas halaman, lihat
-// listener "checkAllBox" di atas). Dipanggil setiap kali tabel/checkbox
-// berubah supaya state selalu konsisten saat pagination/filter berubah.
-function syncCheckAllBoxState() {
+// listener "checkAllBox" di atas). isProcessing menentukan HANYA disabled/
+// enabled -- selalu dipanggil lewat setProcessingState(), jangan di-set
+// terpisah di tempat lain.
+function syncCheckAllBoxState(isProcessing) {
   const checkAllBox = document.getElementById("checkAllBox");
   if (!checkAllBox) return;
-  const locked = isRunLocked();
+  checkAllBox.disabled = !!isProcessing;
   const pagePending = getPageRecords().filter((r) => (batchStatus[r.Record] || "pending") === "pending");
   const checkedOnPage = pagePending.filter((r) => checkedRecords.has(String(r.Record)));
-  checkAllBox.disabled = locked || pagePending.length === 0;
   if (pagePending.length === 0 || checkedOnPage.length === 0) {
     checkAllBox.checked = false;
     checkAllBox.indeterminate = false;
@@ -1541,6 +1602,24 @@ sheetBulkRunBtn.addEventListener("click", () => {
   runRecords([...checkedRecords]);
 });
 
+// V15: Stop -- batalkan SEMUA record yang masih queued (belum mulai diproses)
+// pada batch yang sedang berjalan. Record yang sudah mulai tetap diselesaikan
+// wajar (lihat app.py _process_batch); hasil yang sudah selesai tetap tersimpan.
+sheetStopBtn.addEventListener("click", async () => {
+  if (!currentSessionId) return;
+  // cancelPending=true: disable SEGERA (cegah klik ganda) sebelum poll
+  // berikutnya sinkron -- kontrol lain (checkbox/run) TETAP terkunci sampai
+  // batch benar2 berhenti (record yg sedang jalan tetap diselesaikan wajar).
+  setProcessingState(isRunLocked(), true);
+  try {
+    await fetch(`/api/sheet/cancel/${currentSessionId}`, { method: "POST" });
+    sheetBatchSummary.textContent = "Menghentikan record yang belum diproses...";
+  } catch (err) {
+    sheetMessage.innerHTML = `<div class="error-box">Gagal menghentikan proses: ${err}</div>`;
+    setProcessingState(isRunLocked(), false);
+  }
+});
+
 // Jalankan berdasarkan index/range yang diketik
 sheetSubmitBtn.addEventListener("click", () => {
   if (!currentSessionId) { sheetMessage.textContent = "Muat data Excel/Google Spreadsheet terlebih dahulu."; return; }
@@ -1573,6 +1652,9 @@ sheetExportBtn.addEventListener("click", async () => {
 });
 
 // Satu fungsi submit untuk ketiga cara (per-baris/bulk/index-range) -- semuanya lewat /api/sheet/submit.
+// try/finally: apapun hasilnya (sukses, response error, exception jaringan),
+// state kontrol UI SELALU disinkronkan ulang lewat setProcessingState() di
+// akhir -- tidak ada jalur yang bisa meninggalkan UI nyangkut setengah terkunci.
 async function runRecords(recordNos, rawSelector) {
   if (!currentSessionId) { sheetMessage.textContent = "Muat data Excel/Google Spreadsheet terlebih dahulu."; return; }
   const selector = rawSelector !== undefined ? rawSelector : (recordNos || []).join(",");
@@ -1600,14 +1682,14 @@ async function runRecords(recordNos, rawSelector) {
     startBatchPolling();
   } catch (err) {
     sheetMessage.innerHTML = `<div class="error-box">Gagal menghubungi server: ${err}</div>`;
+  } finally {
+    setProcessingState(isRunLocked());
   }
 }
 
 function updateStatusCells() {
-  const locked = isRunLocked();
   document.querySelectorAll("#sheetTableBody tr").forEach((tr) => {
     const no = tr.dataset.recordNo;
-    const status = batchStatus[no] || "pending";
     const statusCell = tr.querySelector(".status-cell");
     if (statusCell) statusCell.innerHTML = statusCellHtml(no);
     const actionCell = tr.querySelector(".action-cell");
@@ -1616,11 +1698,8 @@ function updateStatusCells() {
     if (finalCell) finalCell.innerHTML = hasilAkhirBadgeHtml(resolveHasilAkhir(batchFinalStatus[no], batchDecision[no]));
     const notesCell = tr.querySelector(".notes-cell");
     if (notesCell) notesCell.innerHTML = notesCellHtml(batchDecision[no]);
-    const checkbox = tr.querySelector(".row-check");
-    if (checkbox) checkbox.disabled = locked || status !== "pending";
   });
-  syncCheckAllBoxState();
-  applyToolbarLock();
+  setProcessingState(isRunLocked());
 }
 
 function startBatchPolling() {
@@ -1643,6 +1722,11 @@ function startBatchPolling() {
         hydrateDoneFinalStatuses(data.status);
         sheetBatchSummary.textContent = `${data.done_count}/${data.total} record selesai diproses.`;
         const stillRunning = Object.values(data.status).some((s) => s === "queued" || s === "processing");
+        // Stop SELALU tampil (tidak pernah display:none); checkbox/tombol
+        // run ikut terbuka kembali otomatis begitu stillRunning=false --
+        // lihat setProcessingState() (tidak ada state disabled yg di-set
+        // manual di sini lagi).
+        setProcessingState(stillRunning, !!data.cancel_requested);
         if (!stillRunning) { batchTimer = null; return; }
       }
     } catch (_) { /* biarkan retry di tick berikutnya */ }
@@ -1668,7 +1752,9 @@ async function fetchSheetResult(record) {
   sheetRoiSection.style.display = "none";
   sheetProgress.stop();
   document.getElementById("sheetProgressSection").style.display = "none";  // fetch hasil jadi -> tidak perlu progress bar OCR
-  loadTemplatePreview(sheetTemplateBox);
+  // Bersihkan preview record SEBELUMNYA dulu supaya tidak pernah kelihatan
+  // nyangkut selagi hasil record baru ini masih dimuat.
+  clearPreviewBoxes([sheetOriginalBox, sheetPreprocessedBox, sheetTemplateRoiBox, sheetRoiDocumentBox], "Memuat...");
   sheetDetail.scrollIntoView({ behavior: "smooth", block: "start" });
 
   // Coba dari localStorage dulu (lebih cepat, tidak bergantung sesi server).
@@ -1688,6 +1774,7 @@ async function fetchSheetResult(record) {
     if (!res.ok) {
       sheetDetailMessage.innerHTML = `<div class="error-box">${data.error || "Hasil belum tersedia"}\n${data.detail || ""}</div>`;
       showLoadingRow(sheetResultBody, 4, "-");
+      clearPreviewBoxes([sheetOriginalBox, sheetPreprocessedBox, sheetTemplateRoiBox, sheetRoiDocumentBox], "Tidak tersedia");
       return;
     }
     try { localStorage.setItem(cacheKey, JSON.stringify(data)); } catch (_) { /* penyimpanan penuh -> abaikan */ }
@@ -1695,11 +1782,18 @@ async function fetchSheetResult(record) {
     sheetDetailMessage.textContent = "Selesai (hasil sudah tersimpan, tidak diproses ulang).";
   } catch (err) {
     sheetDetailMessage.innerHTML = `<div class="error-box">Gagal menghubungi server: ${err}</div>`;
+    clearPreviewBoxes([sheetOriginalBox, sheetPreprocessedBox, sheetTemplateRoiBox, sheetRoiDocumentBox], "Tidak tersedia");
   }
 }
 
 function renderSheetDetail(data) {
-  sheetUploadedBox.innerHTML = `<img src="${data.preview_url}" alt="dokumen">`;
+  setPreviewImage(sheetOriginalBox, data.original_url, "dokumen asli");
+  setPreviewImage(sheetPreprocessedBox, data.preprocessed_url, "dokumen preprocessed");
+  if (data.roi_document_url) {
+    setPreviewImage(sheetTemplateRoiBox, data.template_roi_url, "template roi");
+    setPreviewImage(sheetRoiDocumentBox, data.roi_document_url, "roi document");
+    sheetRoiSection.style.display = "block";
+  }
   renderFieldsTable(sheetResultBody, data.fields, true);
   if (sheetDetailFinalStatus) {
     sheetDetailFinalStatus.innerHTML = hasilAkhirBadgeHtml(
@@ -1718,11 +1812,6 @@ function renderSheetDetail(data) {
   }
   sheetJsonOutput.textContent = JSON.stringify(data.raw_json, null, 2);
   sheetJsonDetails.style.display = "block";
-  if (data.roi_template_url && data.roi_document_url) {
-    sheetRoiTemplateBox.innerHTML = `<img src="${data.roi_template_url}" alt="roi template">`;
-    sheetRoiDocumentBox.innerHTML = `<img src="${data.roi_document_url}" alt="roi document">`;
-    sheetRoiSection.style.display = "block";
-  }
 }
 </script>
 

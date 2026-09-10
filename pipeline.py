@@ -144,6 +144,7 @@ _OCR_PRIMARY_REASON_TEXT = {
     "review": "OCR primary uncertain",
     "geometry_uncertain": "OCR primary geometry-uncertain",
     "conflict": "OCR primary evidence conflicting",
+    "template_leakage": "OCR primary read printed template text (ROI misplacement)",
 }
 
 
@@ -171,6 +172,52 @@ def _note_roi_second_pass():
 # PERNAH memicu fallback apa pun (area memang tidak difoto).
 # ============================================================================
 
+def _detect_template_leakage(value):
+    """V15.2 -- field quality gate (Section B): cek apakah `value` yg SUDAH
+    "read" (OCR Primary percaya diri) sebenarnya teks CETAK STATIS template
+    (label sendiri/tetangga/judul/paragraf -- lihat
+    prep.extract_template_static_text, diturunkan langsung dari
+    template.pdf, TIDAK di-hardcode), bukan isian tulisan tangan/user --
+    bukti kuat ROI salah tempat walau status sudah "read" (confidently
+    wrong, sama polanya dgn root cause V15.1). Reuse
+    dynamic._fuzzy_contains (SUDAH ada, dipakai jalur label-token
+    filtering) drpd bikin fuzzy-match baru. Return fragmen yg cocok (utk
+    notes) atau None."""
+    text = str(value or "").strip()
+    if len(text) < 3:
+        return None
+    for fragment in prep.extract_template_static_text():
+        if dynamic._fuzzy_contains(text, fragment):
+            return fragment
+    return None
+
+
+def _screen_fallback_leakage(candidate):
+    """V18 Fix 2 -- _detect_template_leakage() SEBELUMNYA hanya dicek di
+    _text_fallback_reason() thd nilai OCR PRIMARY (sbg trigger ESKALASI ke
+    fallback) -- begitu eskalasi terjadi, ketiga fallback stage (VLM
+    full-page, ROI/template, ROI second-pass VLM) TIDAK PERNAH menyaring
+    ULANG nilai HASIL MEREKA SENDIRI sebelum dipercaya "read" (row.update).
+    VLM/fallback yg salah-baca judul/paragraf cetak (independen dari OCR
+    Primary, jadi tidak pernah lewat pengecekan di atas) bisa lolos ke
+    output akhir apa adanya (confirmed: record 24 nama_nasabah = persis
+    "Program BRI CUAN HADIAH 2026"). Re-apply screening yg SAMA di SATU titik
+    yg dipanggil oleh ketiga stage, bukan menduplikasi logic-nya 3x.
+    Kalau leakage terdeteksi, turunkan status jadi "review" (BUKAN
+    "not_detected" -- ada bukti bacaan, cuma tidak bisa dipercaya) supaya
+    TIDAK PERNAH ditulis lewat row.update(...)/raw_results[name].update(...)
+    (semua 3 titik panggil itu mensyaratkan status=="read"), sehingga row
+    tetap pada status SEBELUM stage ini & fallback chain lanjut mencoba
+    stage berikutnya (_text_fallback_reason masih melihat status non-"read")."""
+    if candidate.get("status") == "read":
+        leaked = _detect_template_leakage(candidate.get("value"))
+        if leaked:
+            candidate = dict(candidate)
+            candidate["status"] = "review"
+            candidate["template_leakage"] = leaked[:60]
+    return candidate
+
+
 def _text_fallback_reason(name, row, section_meta):
     """Return alasan (str) kalau field TEKS `name` masih butuh fallback,
     None kalau OCR Primary sudah cukup dipercaya."""
@@ -185,6 +232,10 @@ def _text_fallback_reason(name, row, section_meta):
             return "low_confidence"
         return "uncertain"  # V12: confidence menengah TETAP diverifikasi VLM (bukan ROI langsung)
     if status == "read":
+        leaked = _detect_template_leakage(row.get("value"))
+        if leaked:
+            row["template_leakage"] = leaked[:60]  # notes/metadata, lihat Section E -- bukan gambar debug baru
+            return "template_leakage"
         region_name = dynamic.FIELD_REGION_MAP.get(name, (None, None))[0]
         section = section_meta.get(region_name, {}) if region_name else {}
         if section.get("method") == "none":
@@ -230,6 +281,7 @@ def _apply_vlm_text_result(name, raw_results, vlm_results, note):
         candidate = post.build_text_field_result(
             name, prep.FIELD_CONFIG[name], {"raw": item["value"], "confidence": None}
         )
+        candidate = _screen_fallback_leakage(candidate)  # V18 Fix 2
         if candidate["status"] == "read":
             candidate["source"] = "vlm_fullpage"
             candidate["notes"] = note
@@ -401,6 +453,7 @@ def _run_roi_template_fallback(raw_results, field_errors, aligned_img, shape, se
         if not item.get("raw"):
             continue
         candidate = post.build_text_field_result(name, prep.FIELD_CONFIG[name], item)
+        candidate = _screen_fallback_leakage(candidate)  # V18 Fix 2
         # Tidak boleh overwrite hasil yg sudah "read" (mis. dari Full-Page
         # VLM sebelumnya) kecuali candidate ini memang mencapai "read".
         if candidate["status"] == "read" and raw_results[name].get("status") != "read":
@@ -458,6 +511,7 @@ def _run_roi_second_pass_vlm(raw_results, field_errors, aligned_img, shape, sect
             candidate = post.build_text_field_result(
                 name, prep.FIELD_CONFIG[name], {"raw": item["value"], "confidence": None}
             )
+            candidate = _screen_fallback_leakage(candidate)  # V18 Fix 2
             if candidate["status"] == "read":
                 candidate["source"] = "roi_second_pass_vlm"
                 candidate["notes"] = _note_roi_second_pass()
@@ -789,7 +843,14 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
         "choice_groups": choice_groups,
         "raw_results": raw_results,
         "field_errors": field_errors,
-        "debug_images": {"template": debug_template, "document": debug_document},
+        "debug_images": {
+            "template": debug_template, "document": debug_document,
+            # V15.2: gambar MENTAH (sebelum ROI box digambar) -- utk visual
+            # comparison "original vs preprocessed" (lihat app.py). Sengaja
+            # tidak dihitung ulang di app.py (hemat 1x load_document/
+            # prepare_and_align) -- sudah ada di sini.
+            "original": filled_raw, "preprocessed": aligned_img,
+        },
         "dynamic_regions_debug": dynamic_regions_debug,
         "ocr_meta": {
             "strategy": "v12_ocr_primary_vlm_fullpage_roi_template_second_pass",

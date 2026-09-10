@@ -41,6 +41,9 @@ import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+# V18 -- kumpul di eval_runs/ bareng output evaluation.py/stage_evaluation.py
+# (lihat handover.md §12).
+EVAL_RUNS_DIR = BASE_DIR / "eval_runs"
 
 # Metadata key yang TIDAK dianggap "metrik terukur" (label run itu sendiri),
 # ditampilkan sbg header, bukan baris tabel metrik.
@@ -205,7 +208,8 @@ def main():
         print("Tidak ada summary valid yang bisa dibandingkan.", file=sys.stderr)
         sys.exit(1)
 
-    output_prefix = args.output_prefix or str(BASE_DIR / f"compare_runs_{int(time.time())}")
+    EVAL_RUNS_DIR.mkdir(exist_ok=True)
+    output_prefix = args.output_prefix or str(EVAL_RUNS_DIR / f"compare_runs_{int(time.time())}")
 
     all_tables = []
     for kind, items in by_kind.items():

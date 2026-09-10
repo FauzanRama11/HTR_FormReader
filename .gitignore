@@ -11,6 +11,7 @@ outputs/
 uploads/
 downloaded_documents/
 stage_evaluation_debug_baseline/*
+eval_runs/
 models/
 weights/
 checkpoints/

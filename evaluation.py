@@ -56,6 +56,10 @@ import comparison
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DEBUG_DIR = BASE_DIR / "evaluation_debug"
+# V18 -- semua output evaluasi (results csv + summary json) dikumpulkan di
+# SATU folder (sebelumnya berserakan di root project, sulit ditemukan di
+# antara file kode) -- lihat handover.md §12.
+EVAL_RUNS_DIR = BASE_DIR / "eval_runs"
 
 # 5 field keputusan (sesuai handover.md) -> kolom ground truth di spreadsheet
 # evaluasi (SPREADSHEET_COLUMNS milik data_input.py).
@@ -150,7 +154,15 @@ def compare_field(field_name, extracted_value, ground_truth_value):
     if field_name == "nama_nasabah":
         a, b = _norm_text(extracted_value), _norm_text(ground_truth_value)
     elif field_name == "nomor_rekening":
-        a, b = _digits_only(extracted_value), _digits_only(ground_truth_value)
+        # V18 Fix 1a -- int-cast (sama spt _norm_numeric, reuse LANGSUNG)
+        # bukan _digits_only mentah: ground truth di spreadsheet sumber
+        # kadang kehilangan leading zero (koersi numerik Excel di hulu
+        # sistem ini), sehingga nomor yg SAMA persis (mis. "066601005283536"
+        # vs "66601005283536") ke-flag MISMATCH murni krn leading zero --
+        # bukan kesalahan ekstraksi. int-cast SAMA aman spt yg sudah dipakai
+        # nominal_penempatan (_norm_numeric) -- monotonic, pasangan yg sudah
+        # sama persis sbg string tetap sama setelah int-cast.
+        a, b = _norm_numeric(extracted_value), _norm_numeric(ground_truth_value)
     elif field_name == "nominal_penempatan":
         a, b = _norm_numeric(extracted_value), _norm_numeric(ground_truth_value)
     elif field_name == "tenor_penempatan":
@@ -523,8 +535,9 @@ def main():
     parser.add_argument("--output-csv", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
-    args.output_csv = args.output_csv or str(BASE_DIR / f"evaluation_results_{args.label}.csv")
-    args.output_json = args.output_json or str(BASE_DIR / f"evaluation_summary_{args.label}.json")
+    EVAL_RUNS_DIR.mkdir(exist_ok=True)
+    args.output_csv = args.output_csv or str(EVAL_RUNS_DIR / f"evaluation_results_{args.label}.csv")
+    args.output_json = args.output_json or str(EVAL_RUNS_DIR / f"evaluation_summary_{args.label}.json")
 
     pipeline_module = importlib.import_module(args.pipeline) if args.pipeline != "pipeline" else pipeline
     if args.vlm_fallback is not None and hasattr(pipeline_module, "VLM_FALLBACK_ENABLED"):

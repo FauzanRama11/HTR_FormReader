@@ -79,6 +79,34 @@ ANCHOR_SEARCH_TOL_X = 0.020     # toleransi pencarian anchor (fraksi lebar)
 ANCHOR_SEARCH_TOL_Y = 0.015     # toleransi pencarian anchor (fraksi tinggi)
 ANCHOR_MATCH_MIN = 0.30         # skor matchTemplate minimum agar dianggap valid
 
+# V15 -- root cause "block-shift": cabang mencetak letterhead dgn TINGGI
+# BERBEDA-BEDA (sebagian pakai blok alamat/telp/fax tambahan spt template
+# referensi, sebagian tidak) -- konten identity_area/placement_area di bawah
+# letterhead ikut bergeser sejumlah TETAP (bukan proporsional/scale), yg
+# TIDAK bisa direpresentasikan oleh affine/homography global (itu hanya
+# scale+rotasi+translasi SERAGAM utk seluruh halaman). Terverifikasi visual
+# 25-dokumen: 6/25 (24%) identity_area/placement_area jatuh di teks judul
+# cetak "FORMULIR KEIKUTSERTAAN"/paragraf, BUKAN field asli -- krn toleransi
+# pencarian anchor per-field (ANCHOR_SEARCH_TOL_Y di atas, ~31px pd kanvas
+# 2105px) jauh lebih kecil drpd selisih tinggi letterhead (~60-100px),
+# sehingga anchor field itu sendiri gagal/salah ketemu SEBELUM sempat
+# mengoreksi apa pun.
+#
+# Fix: judul form ("FORMULIR KEIKUTSERTAAN" + "Program BRI CUAN HADIAH 2026")
+# SELALU ada persis di posisi yg sama relatif thd identity_area/placement_area
+# di SEMUA sampel yg diperiksa, besar & khas (2 baris tebal terpusat) --
+# kandidat anchor yg jauh lebih andal drpd label field kecil. Dipakai sbg
+# anchor TAMBAHAN (bukan pengganti) di SECTION_ANCHOR_BBOXES dgn toleransi
+# pencarian JAUH LEBIH LEBAR (lihat TITLE_ANCHOR_SEARCH_TOL_Y) khusus utk
+# anchor ini saja, supaya bisa menjangkau letterhead setinggi apa pun --
+# tetap masuk lewat estimate_section_transform's outlier-rejection +
+# affine-fit yg SAMA (bukan jalur terpisah), jadi kalau ternyata tidak
+# ketemu/tidak konsisten dgn anchor lain, otomatis tidak dipakai (tidak
+# pernah memperburuk dokumen yg sudah normal).
+TITLE_ANCHOR_BBOX_NORM = (0.38, 0.111, 0.63, 0.136)
+TITLE_ANCHOR_SEARCH_TOL_X = 0.030
+TITLE_ANCHOR_SEARCH_TOL_Y = 0.070   # ~147px pd kanvas 2105px -- jangkau letterhead jauh lebih tinggi drpd template
+
 DIFF_THRESHOLD = 38
 BLANK_THRESHOLD = 0.008         # rasio piksel tinta minimum agar dianggap terisi
 CROP_PAD_RATIO = 0.20           # padding vertikal/horizontal utk ascender/descender
@@ -96,6 +124,36 @@ BASE_DIR = Path(__file__).resolve().parent
 _ASSET_TEMPLATE = BASE_DIR / "assets" / "template.pdf"
 _LOCAL_TEMPLATE = BASE_DIR / "template.pdf"
 TEMPLATE_PATH = str(_ASSET_TEMPLATE if _ASSET_TEMPLATE.exists() else _LOCAL_TEMPLATE)
+
+_template_static_text_cache = None
+
+
+def extract_template_static_text(template_path=None):
+    """V15.2 -- ekstrak fragmen teks CETAK STATIS (judul/label/paragraf) dari
+    template.pdf langsung (pymupdf, SUDAH dependency -- tidak perlu
+    pdfplumber baru) -- dipakai field quality gate (pipeline.py) utk deteksi
+    "template leakage": field value yg ternyata berisi teks cetak (label
+    sendiri/tetangga/judul/paragraf), bukan isian tulisan tangan/user -- bukti
+    kuat ROI salah tempat. TIDAK di-hardcode dari luar, SELALU diturunkan
+    ulang dari template.pdf per baris teks (per requirement eksplisit).
+    Di-cache in-memory (template.pdf statis, tidak berubah selama proses
+    jalan) -- panggil sekali per proses, bukan per field/per dokumen."""
+    global _template_static_text_cache
+    if _template_static_text_cache is not None:
+        return _template_static_text_cache
+    path = template_path or TEMPLATE_PATH
+    doc = fitz.open(str(path))
+    text = doc[0].get_text("text")
+    doc.close()
+    fragments = []
+    for line in text.split("\n"):
+        line = line.replace("​", "").strip()
+        alnum = sum(1 for c in line if c.isalnum())
+        if len(line) < 3 or alnum < 3:
+            continue  # baris kosong/placeholder isian (titik-titik/underscore), bukan teks statis sungguhan
+        fragments.append(line)
+    _template_static_text_cache = fragments
+    return fragments
 
 
 # Koordinat dinormalisasi (0-1), diekstrak presisi dari template.pdf asli.
@@ -187,6 +245,43 @@ SIGNATURE_CONFIG = {
     },
 }
 
+# V17 Finding 3 (Phase A) -- signature_nasabah's value_bbox, unlike
+# signature_atasan's, sits almost exactly on top of a PRINTED graphic in
+# template.pdf ("Opsional (Tidak Wajib) materai Rp10.000" rounded-rectangle
+# border + 4 lines of text, confirmed visually by cropping the template at
+# this exact bbox) -- template_subtraction against a box that itself has
+# printed content is inherently noisy (registration misalignment of that
+# printed border/text alone can register as "ink"). Threshold at 230
+# (measured on the template crop itself: pixel intensities are either ~255
+# background or <220 border/text, gap confirmed empirically -- see
+# handover.md) isolates just those printed pixels; NOT hardcoded from a
+# guess. Dilated 3x3/1 iter for registration tolerance (alignment isn't
+# pixel-perfect). For signature_atasan the template crop is pure white, so
+# this naturally returns an all-zero (no-op) mask -- safe to call for BOTH
+# fields unconditionally, no field-specific branching needed.
+SIGNATURE_STATIC_MASK_THRESHOLD = 230
+_signature_static_mask_cache = {}
+
+
+def signature_static_content_mask(template_gray, name, shape):
+    """Mask (uint8, same size as the field's template/target crop) of pixels
+    that are PRINTED CONTENT in template.pdf at `name`'s value_bbox -- derived
+    directly from the template crop's own intensity (same "derive from
+    template, don't hardcode" pattern as extract_template_static_text, just
+    at pixel level instead of text level). Cached per (name, shape) since
+    template_gray/shape don't change within one process run."""
+    cache_key = (name, shape[0], shape[1])
+    cached = _signature_static_mask_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    template_px = norm_bbox_to_px(SIGNATURE_CONFIG[name]["value_bbox"], shape)
+    x1, y1, x2, y2 = template_px
+    crop = template_gray[y1:y2, x1:x2]
+    _, mask = cv2.threshold(crop, SIGNATURE_STATIC_MASK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+    mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
+    _signature_static_mask_cache[cache_key] = mask
+    return mask
+
 # V10 -- anchors used for SECTION-level (identity/placement) robust local
 # transform estimation. Reuses existing FIELD_CONFIG/CHOICE_GROUPS anchors
 # (no new hardcoded coordinates) -- multiple anchors per section so a single
@@ -194,6 +289,16 @@ SIGNATURE_CONFIG = {
 # way a lone per-field dx/dy could.
 _IDENTITY_ANCHOR_FIELDS = ["nama_nasabah", "nomor_rekening", "unit_kerja_pengelola_rekening"]
 _PLACEMENT_ANCHOR_FIELDS = ["nominal_penempatan", "rentang_tenor", "reward_non_tunai", "reward_tunai"]
+
+# V15: judul form dipakai sbg anchor FALLBACK terpisah (lihat
+# estimate_section_transform's `title_anchor` param) utk KEDUA section --
+# letterhead cabang yg lebih tinggi drpd template menggeser identity_area DAN
+# placement_area dgn jumlah yg SAMA (satu blok, di bawah header yg sama).
+# SENGAJA TIDAK digabung ke SECTION_ANCHOR_BBOXES (dicoba, terbukti merusak
+# dokumen yg field-anchor-nya sendiri sudah benar -- lihat
+# _fit_transform_from_anchors docstring) -- dipakai lewat parameter terpisah
+# di _resolve_section_transforms (dynamic_extraction.py).
+TITLE_ANCHOR_ENTRY = (TITLE_ANCHOR_BBOX_NORM, TITLE_ANCHOR_SEARCH_TOL_X, TITLE_ANCHOR_SEARCH_TOL_Y)
 
 SECTION_ANCHOR_BBOXES = {
     "identity_area": [FIELD_CONFIG[f]["anchor_bbox"] for f in _IDENTITY_ANCHOR_FIELDS],
@@ -1004,21 +1109,17 @@ def resolve_roi(template_gray, target_gray, cfg, shape):
 # ============================================================================
 
 
-def estimate_section_transform(template_gray, aligned_gray, shape, anchor_bboxes_norm):
-    """Return dict diagnostik + 'M' (2x3 float64, template->aligned) atau
-    None kalau tidak ada anchor valid sama sekali."""
-    h, w = shape[:2]
-    pts_template, pts_target = [], []
-    for bbox_norm in anchor_bboxes_norm:
-        ax1, ay1, ax2, ay2 = norm_bbox_to_px(bbox_norm, shape)
-        cx, cy = (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0
-        dx, dy, sim, matched = locate_anchor_offset(template_gray, aligned_gray, bbox_norm, shape)
-        if not matched or sim < SECTION_ANCHOR_MIN_SIMILARITY:
-            continue
-        pts_template.append((cx, cy))
-        pts_target.append((cx + dx, cy + dy))
-
-    n_total = len(anchor_bboxes_norm)
+def _fit_transform_from_anchors(pts_template, pts_target, n_total, w, h):
+    """Inti estimate_section_transform (TIDAK BERUBAH dari pre-V15): median
+    offset -> outlier rejection -> affine (>=3 anchor bersih) -> konsensus
+    translasi (1-2) -> none. Dipisah jadi fungsi sendiri supaya bisa dipakai
+    utk 2 pool anchor yang BERBEDA (field vs judul, lihat
+    estimate_section_transform) TANPA mencampur keduanya dalam satu vote --
+    V15 sempat mencoba menggabung keduanya dlm satu pool (median/similarity-
+    weighted), TERBUKTI merusak dokumen yang sebelumnya sudah benar (anchor
+    field & anchor judul bisa sama-sama valid tapi mengukur offset lokal
+    berbeda pada posisi halaman berbeda -- merata-ratakan dua kebenaran yang
+    berbeda menghasilkan kesalahan ketiga, bukan kebenaran ketiga)."""
     if not pts_template:
         return {"M": None, "method": "none", "anchors_used": 0, "anchors_total": n_total, "outliers": 0}
 
@@ -1061,6 +1162,147 @@ def estimate_section_transform(template_gray, aligned_gray, shape, anchor_bboxes
         }
 
     return {"M": None, "method": "none", "anchors_used": 0, "anchors_total": n_total, "outliers": n_outliers}
+
+
+def _match_anchor_pool(template_gray, aligned_gray, shape, anchor_bboxes_norm):
+    """Cocokkan satu pool anchor (list of bbox 4-float, ATAU (bbox,tol_x,tol_y)
+    utk toleransi pencarian custom) -> (pts_template, pts_target, sims,
+    max_sim). Dipisah dari _fit_transform_from_anchors supaya field-pool dan
+    title-pool bisa dicocokkan independen (lihat estimate_section_transform)."""
+    pts_template, pts_target, sims = [], [], []
+    for entry in anchor_bboxes_norm:
+        if len(entry) == 4:
+            bbox_norm, tol_x, tol_y = entry, ANCHOR_SEARCH_TOL_X, ANCHOR_SEARCH_TOL_Y
+        else:
+            bbox_norm, tol_x, tol_y = entry
+        ax1, ay1, ax2, ay2 = norm_bbox_to_px(bbox_norm, shape)
+        cx, cy = (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0
+        dx, dy, sim, matched = locate_anchor_offset(
+            template_gray, aligned_gray, bbox_norm, shape, tol_x=tol_x, tol_y=tol_y
+        )
+        if not matched or sim < SECTION_ANCHOR_MIN_SIMILARITY:
+            continue
+        pts_template.append((cx, cy))
+        pts_target.append((cx + dx, cy + dy))
+        sims.append(sim)
+    max_sim = max(sims) if sims else 0.0
+    return pts_template, pts_target, sims, max_sim
+
+
+# V15 -- letterhead cabang yg lebih tinggi drpd template membuat anchor field
+# gagal/tidak akurat, lihat TITLE_ANCHOR_* di atas. Ambang MIN_SIMILARITY judul
+# SEMULA 0.5 (dipilih dari 1 kasus, blm divalidasi luas) -- TERBUKTI terlalu
+# ketat, membuang 2 match judul yg SEBENARNYA genuine & konsisten dgn pola
+# pergeseran nyata (record 15 sim=0.448 dy=59px, record 19 sim=0.496 dy=54px
+# -- keduanya sejalan dgn record 10/13/22 yg dy~52-78px). Diturunkan ke 0.40,
+# masih di atas record 20 (sim=0.310, DI BAWAH SECTION_ANCHOR_MIN_SIMILARITY
+# 0.32 -- genuinely tidak ketemu, tetap tidak dapat rujukan & itu wajar).
+TITLE_ANCHOR_FALLBACK_MIN_SIMILARITY = 0.40
+
+# V15.1 -- ROOT CAUSE FIX dari V15: trigger fallback SEBELUMNYA cuma
+# "similarity anchor field tertinggi < 0.36" (FIELD_ANCHORS_WEAK_MAX_SIMILARITY,
+# dihapus) -- TERBUKTI tidak cukup. Kasus nyata (record block-shift, section
+# placement_area): 4 anchor dgn similarity individual biasa-biasa saja
+# (0.33-0.45, SEMUANYA di atas 0.36) tapi CUKUP utk lolos ke jalur
+# `estimateAffinePartial2D` (>=3 anchor) & menghasilkan fit yg LULUS semua
+# sanity check (rotasi 4.5 derajat, scale 0.96 -- keduanya wajar) TAPI SALAH
+# scr faktual (translasi hasil fit dy=-13, padahal judul yg sama-sama diukur
+# di dokumen yg sama menunjukkan dy=+61 -- confidently wrong, bukan terlihat
+# lemah sama sekali). Similarity anchor individual TIDAK cukup jadi sinyal
+# "apakah HASIL fit-nya benar" -- fit yg salah bisa tetap lolos semua
+# pengecekan sanity yg sudah ada (rotasi/scale/outlier-distance).
+#
+# Fix: anchor judul SELALU dihitung (kalau tersedia & similarity-nya sendiri
+# cukup tinggi -- lihat TITLE_ANCHOR_FALLBACK_MIN_SIMILARITY), lalu translasi
+# HASIL field-only (kolom translasi M, berlaku sama utk section_affine maupun
+# consensus_translation) dibandingkan LANGSUNG ke translasi judul. Disagree
+# lebih dari ambang ini -> title dipakai SENDIRIAN (bukan dicampur, prinsip yg
+# sama spt sebelumnya), TERLEPAS dari seberapa "percaya diri" fit field-only
+# terlihat. Ambang dipakai ULANG dari SECTION_OUTLIER_DIST_RATIO (constant yg
+# SAMA dipakai utk outlier-rejection antar anchor -- konsisten, bukan angka
+# baru) -- diverifikasi cocok utk 2 kasus nyata: record block-shift
+# placement_area (jarak translasi field-vs-judul ~94px, MELEBIHI ambang -> di-
+# override, BENAR) dan record normal identity_area (jarak ~36px, DI BAWAH
+# ambang -> TIDAK di-override, mempertahankan hasil yg SUDAH benar).
+# V15.1-b -- ROOT CAUSE FIX dari V15.1: perbandingan JARAK translasi penuh
+# (2D) TERBUKTI bukan diskriminator yg cukup (record 2 [identity_area, HARUS
+# dipertahankan] jarak ~36px vs record 13 [identity_area, HARUS di-override]
+# jarak ~30px -- lebih kecil drpd record 2, satu ambang jarak tidak bisa
+# memisahkan keduanya). Percobaan kedua (overlap kotak kandidat vs kotak
+# judul sungguhan) benar utk identity_area TAPI gagal total utk
+# placement_area (record 10): box placement_area yg SALAH "nangkring" di
+# PARAGRAF LAIN (bukan judul itu sendiri), jadi tidak pernah tumpang tindih
+# dgn kotak judul sama sekali walau translasinya sama-sama salah.
+#
+# Fix final: pakai SUMBU-Y SAJA (fenomena block-shift murni pergeseran
+# vertikal krn tinggi letterhead, bukan horizontal), bandingkan translasi-Y
+# field-only thd DUA rujukan: 0 (posisi template asli/tanpa koreksi) DAN
+# translasi-Y judul (pergeseran halaman yg sungguhan terukur, independen
+# dari section mana pun). Field-only dianggap "nyangkut di posisi asli"
+# (anchor-nya gagal menjangkau konten yg SUDAH bergeser, bukan koreksi lokal
+# yg genuinely berbeda) kalau translasi-Y-nya LEBIH DEKAT ke 0 drpd ke
+# translasi-Y judul -- sinyal ini brlaku SAMA baik field-only itu nyangkut di
+# judul (identity_area) MAUPUN di paragraf lain (placement_area), krn tidak
+# bergantung pd APA yg ada di lokasi yg salah itu, hanya pd SEBERAPA JAUH dari
+# posisi asli field-only berhasil bergerak dibanding yg SEHARUSNYA (per
+# judul). Judul sendiri harus menunjukkan pergeseran yg BERARTI (>=
+# MIN_TITLE_SHIFT_PX) sebelum dipakai sbg rujukan -- dokumen normal (judul
+# sendiri dy~0-1px) tidak pernah masuk perbandingan ini sama sekali, jadi
+# TIDAK PERNAH override field-only yg sudah genuinely benar (record 2/4/12,
+# semua dgn |title_dy| dibawah ambang) terlepas dari translasi-Y field-only-
+# nya sendiri berapa.
+MIN_TITLE_SHIFT_PX = 15.0
+
+
+def estimate_section_transform(template_gray, aligned_gray, shape, anchor_bboxes_norm, title_anchor=None,
+                                section_bbox_norm=None):
+    """Return dict diagnostik + 'M' (2x3 float64, template->aligned) atau
+    None kalau tidak ada anchor valid sama sekali.
+
+    `title_anchor`: entri (bbox, tol_x, tol_y) opsional (lihat
+    TITLE_ANCHOR_BBOX_NORM). V15.1: SELALU dicocokkan (bukan cuma saat anchor
+    field terlihat lemah) dan dipakai sbg CROSS-CHECK thd hasil field-only --
+    TIDAK PERNAH dicampur ke pool anchor field yang sama (lihat
+    _fit_transform_from_anchors docstring kenapa).
+    `section_bbox_norm`: TIDAK dipakai lagi oleh cross-check (lihat
+    MIN_TITLE_SHIFT_PX docstring -- perbandingan sumbu-Y polos terbukti lebih
+    andal drpd overlap kotak), dipertahankan sbg parameter utk kompatibilitas
+    pemanggil, boleh None."""
+    h, w = shape[:2]
+    pts_template, pts_target, sims, max_sim = _match_anchor_pool(
+        template_gray, aligned_gray, shape, anchor_bboxes_norm
+    )
+    field_result = _fit_transform_from_anchors(pts_template, pts_target, len(anchor_bboxes_norm), w, h)
+
+    if title_anchor is None:
+        return field_result
+
+    t_pts_template, t_pts_target, t_sims, t_max_sim = _match_anchor_pool(
+        template_gray, aligned_gray, shape, [title_anchor]
+    )
+    if t_max_sim < TITLE_ANCHOR_FALLBACK_MIN_SIMILARITY:
+        return field_result  # judul sendiri tidak ketemu dgn cukup yakin -- tidak ada rujukan yg valid
+
+    title_result = _fit_transform_from_anchors(t_pts_template, t_pts_target, 1, w, h)
+    if title_result["M"] is None:
+        return field_result
+
+    title_dy = float(title_result["M"][1, 2])
+    if field_result["M"] is None:
+        disagree = abs(title_dy) >= MIN_TITLE_SHIFT_PX  # field-only tidak punya hasil sama sekali
+    elif abs(title_dy) < MIN_TITLE_SHIFT_PX:
+        disagree = False  # judul sendiri tidak menunjukkan pergeseran berarti -- tidak ada dasar utk override
+    else:
+        field_dy = float(field_result["M"][1, 2])
+        disagree = abs(field_dy) < abs(field_dy - title_dy)  # field-only nyangkut lebih dekat ke posisi asli (0) drpd ke pergeseran sungguhan
+
+    if disagree:
+        title_result["method"] = "title_fallback_translation"
+        title_result["field_anchors_max_similarity"] = max_sim
+        title_result["field_result_method"] = field_result["method"]
+        return title_result
+
+    return field_result
 
 
 def apply_section_transform(bbox_px, M):
@@ -1164,20 +1406,33 @@ def _expand_bbox(bbox_px, shape, expand_x_ratio, extra_height_px, min_x1_px=None
     return _clip_bbox((new_x1, y1, x2 + dx, y2 + extra_height_px), shape)
 
 
-def _clamp_field_box_y(bbox_px, field_name, shape):
+def _clamp_field_box_y(bbox_px, field_name, shape, dy=0.0):
     """Kunci sisi ATAS & BAWAH bbox field (SEBELUM diperluas) ke batas field
     tetangga (PREV_FIELD_BOTTOM_NORM / NEXT_FIELD_TOP_NORM). Ini jaring
     pengaman independen dari akurasi offset anchor (dx,dy): walau anchor
     meleset (mis. karena skew foto), ROI tidak akan pernah "naik" ke field
     sebelumnya (keluhan "terlalu ke atas") atau "turun" membaca awal field
     berikutnya (keluhan hasil field tertukar, mis. nama ketimpa nomor
-    rekening)."""
+    rekening).
+
+    `dy` (V17 Finding 1, default 0.0 -- SEMUA pemanggil lama TIDAK berubah
+    perilakunya): geser batas tetangga (yg dihitung dari koordinat TEMPLATE,
+    tanpa shift) sejauh dy YANG SAMA dgn pergeseran bbox_px ini sendiri
+    SEBELUM di-clamp. Root cause TERVERIFIKASI via debug empirik (lihat
+    handover.md): section transform (consensus_translation/section_affine)
+    BISA menggeser satu baris identity_area turun/naik beberapa piksel scr
+    SAH (bukan drift acak, terkonfirmasi konsisten dgn baris lain di record
+    yg sama) -- tapi batas tetangga statis (posisi template, dy=0) TIDAK
+    ikut bergeser, jadi box yg SUDAH BENAR malah ke-clip oleh batas yg belum
+    ikut pindah. Memanggil dgn dy=0 (default) menghasilkan hasil PERSIS SAMA
+    dgn versi lama (batas statis) -- HANYA pemanggil yg eksplisit memberikan
+    dy yg perilakunya berubah."""
     x1, y1, x2, y2 = bbox_px
     h = shape[0]
     if field_name in PREV_FIELD_BOTTOM_NORM:
-        y1 = max(y1, int(PREV_FIELD_BOTTOM_NORM[field_name] * h))
+        y1 = max(y1, int(PREV_FIELD_BOTTOM_NORM[field_name] * h + dy))
     if field_name in NEXT_FIELD_TOP_NORM:
-        y2 = min(y2, int(NEXT_FIELD_TOP_NORM[field_name] * h))
+        y2 = min(y2, int(NEXT_FIELD_TOP_NORM[field_name] * h + dy))
     if y2 <= y1:  # jaga-jaga kalau batas tabrakan -> jangan sampai bbox invalid
         y1, y2 = bbox_px[1], bbox_px[3]
     return _clip_bbox((x1, y1, x2, y2), shape)
