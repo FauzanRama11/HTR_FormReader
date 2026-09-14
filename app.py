@@ -39,23 +39,29 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# V19 -- optional: auto-load GEMINI_API_KEY/HF_TOKEN/VLM_MODEL_PATH/etc from a
+# local .env file if python-dotenv is installed (see .env.example). Guarded so
+# a missing .env or missing package is a silent no-op -- values can also just
+# be exported in the shell environment directly, this is convenience only,
+# never required. MUST run BEFORE importing any project module below --
+# vlm.py reads several env vars (VLM_MODEL_PATH chief among them) as
+# MODULE-LEVEL constants, evaluated once at first import; loading .env any
+# later leaves them frozen at their empty/default values for the life of the
+# process (confirmed: this silently made the local VLM engine fall back to
+# the wrong/older model in models/Qwen2-VL-2B-Instruct instead of
+# VLM_MODEL_PATH's Qwen3-VL-4B-Instruct on every real server run).
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import comparison
 import data_input
 import extractors
 import pipeline
 import preprocessing as prep
 import postprocessing as post
-
-# V19 -- optional: auto-load GEMINI_API_KEY/HF_TOKEN from a local
-# .env file if python-dotenv is installed (see .env.example). Guarded so a
-# missing .env or missing package is a silent no-op -- API keys can also
-# just be exported in the shell environment directly, this is convenience
-# only, never required.
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
