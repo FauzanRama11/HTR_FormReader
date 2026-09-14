@@ -50,6 +50,7 @@ from pathlib import Path
 import cv2
 
 import data_input
+import extractors
 import pipeline
 import preprocessing as prep
 import comparison
@@ -74,6 +75,9 @@ FIELD_GT_MAP = {
 FAILURE_STAGES = (
     "INPUT", "ALIGNMENT", "LOCALIZATION", "OCR", "VISUAL_CHOICE",
     "NORMALIZATION", "INTERNAL_VALIDATION", "SIGNATURE", "COMPARISON", "DECISION",
+    # V19 -- extractors.ExtractorError.stage values, ONLY reachable for
+    # non-"v18" --engine runs (see evaluate_record's engine branch below).
+    "API_AUTH", "API_RATE_LIMIT", "API_TIMEOUT", "API_RESPONSE",
 )
 # V9.2 catatan: pipeline.run_pipeline() sbg satu kesatuan mencakup tahap
 # LOCALIZATION/OCR/VISUAL_CHOICE/NORMALIZATION/SIGNATURE internal (tidak
@@ -219,6 +223,7 @@ def _extract_value(fields_table, raw_results, field_name):
 def _blank_result(record):
     result = {
         "record": record.get("Record"),
+        "engine": None,  # V19 -- di-set oleh evaluate_record right after this
         "regional_office": record.get("Regional Office"),
         "branch_office": record.get("Nama Branch Office"),
         "document_url": record.get("Surat Pernyataan"),
@@ -269,66 +274,100 @@ def _save_debug(debug_dir, record, aligned_img, regions):
 
 
 def evaluate_record(record, template_img, template_path, debug_dir, debug_failed_only=True,
-                     pipeline_module=pipeline):
+                     pipeline_module=pipeline, engine="v18"):
+    """V19: `engine` selects exactly ONE extractor (see extractors.ENGINES).
+    "v18" runs the ORIGINAL, UNCHANGED code path below (doc load + ALIGNMENT
+    + LOCALIZATION diagnostics + pipeline_module.run_pipeline -- all as
+    before). Any other engine has NO template/alignment/ROI concept, so those
+    diagnostic stages are skipped entirely (marked "not_applicable", not
+    faked) and extractors.run() is called directly instead. COMPARISON/
+    DECISION below are UNCHANGED for either branch -- both produce the same
+    pipeline_result shape (fields/raw_results/choice_groups)."""
     result = _blank_result(record)
+    result["engine"] = engine
     t0 = time.time()
 
-    # -- Tahap INPUT --------------------------------------------------------
+    # -- Tahap INPUT (SAMA utk semua engine -- setiap engine tetap butuh
+    # path dokumen lokal) --------------------------------------------------
     try:
         doc_path = data_input.get_document_path(record)
         if not doc_path:
             result["failure_stage"] = "INPUT"
             result["failure_reason"] = "document_not_found_or_download_failed"
             return result
-        doc_img = prep.load_document(doc_path)
-        result["load_success"] = True
     except Exception as exc:
         result["failure_stage"] = "INPUT"
         result["failure_reason"] = f"{type(exc).__name__}: {exc}"
         return result
 
-    # -- Tahap ALIGNMENT ------------------------------------------------------
-    try:
-        aligned_img, _H, align_meta = prep.prepare_and_align(doc_path, doc_img, template_img)
-        result["alignment_status"] = align_meta.get("status")
-        result["alignment_method"] = align_meta.get("method", "N/A")
-        result["alignment_rotation_deg"] = align_meta.get("rotation_deg", "N/A")
-        result["alignment_inlier_ratio"] = align_meta.get("inlier_ratio", "N/A")
-        if align_meta.get("status") == "failed":
+    aligned_img, regions = None, None
+    if engine == "v18":
+        # -- Tahap ALIGNMENT (V18 SAJA -- diagnostik template/homography
+        # SEBELUM run_pipeline, TIDAK diduplikasi/diubah dari sebelumnya) --
+        try:
+            doc_img = prep.load_document(doc_path)
+            result["load_success"] = True
+            aligned_img, _H, align_meta = prep.prepare_and_align(doc_path, doc_img, template_img)
+            result["alignment_status"] = align_meta.get("status")
+            result["alignment_method"] = align_meta.get("method", "N/A")
+            result["alignment_rotation_deg"] = align_meta.get("rotation_deg", "N/A")
+            result["alignment_inlier_ratio"] = align_meta.get("inlier_ratio", "N/A")
+            if align_meta.get("status") == "failed":
+                result["failure_stage"] = "ALIGNMENT"
+                result["failure_reason"] = align_meta.get("reason", "alignment_failed")
+                return result
+        except Exception as exc:
             result["failure_stage"] = "ALIGNMENT"
-            result["failure_reason"] = align_meta.get("reason", "alignment_failed")
+            result["failure_reason"] = f"{type(exc).__name__}: {exc}"
             return result
-    except Exception as exc:
-        result["failure_stage"] = "ALIGNMENT"
-        result["failure_reason"] = f"{type(exc).__name__}: {exc}"
-        return result
 
-    # -- Tahap LOCALIZATION (semantic region, fondasi anchor+spasial V9.2) --
-    regions = None
-    try:
-        regions = prep.extract_semantic_regions(aligned_img, aligned_img.shape)
-        result["region_status"] = "ok" if regions else "empty"
-    except Exception as exc:
-        result["region_status"] = "failed"
-        result["failure_stage"] = "LOCALIZATION"
-        result["failure_reason"] = f"{type(exc).__name__}: {exc}"
-        _save_debug(debug_dir, record, aligned_img, regions)
-        return result
+        # -- Tahap LOCALIZATION (semantic region, V18 SAJA) --
+        try:
+            regions = prep.extract_semantic_regions(aligned_img, aligned_img.shape)
+            result["region_status"] = "ok" if regions else "empty"
+        except Exception as exc:
+            result["region_status"] = "failed"
+            result["failure_stage"] = "LOCALIZATION"
+            result["failure_reason"] = f"{type(exc).__name__}: {exc}"
+            _save_debug(debug_dir, record, aligned_img, regions)
+            return result
 
-    # -- Tahap PIPELINE penuh (LOCALIZATION+OCR+VISUAL_CHOICE+NORMALIZATION+
-    # SIGNATURE terjadi di dalam run_pipeline sbg satu orkestrasi -- TIDAK
-    # dipecah ulang di sini spy tidak menduplikasi pipeline.py). Kegagalan
-    # dipetakan best-effort ke salah satu tahap resmi lewat pesan exception.
-    try:
-        pipeline_result = pipeline_module.run_pipeline(doc_path, template_path=template_path)
-        result["pipeline_success"] = True
-    except Exception as exc:
-        reason = f"{type(exc).__name__}: {exc}"
-        result["failure_stage"] = _map_pipeline_failure_stage(reason)
-        result["failure_reason"] = reason
-        result["processing_time_sec"] = round(time.time() - t0, 2)
-        _save_debug(debug_dir, record, aligned_img, regions)
-        return result
+        # -- Tahap PIPELINE penuh (V18 SAJA -- LOCALIZATION+OCR+VISUAL_CHOICE+
+        # NORMALIZATION+SIGNATURE terjadi di dalam run_pipeline sbg satu
+        # orkestrasi -- TIDAK dipecah ulang di sini spy tidak menduplikasi
+        # pipeline.py). Kegagalan dipetakan best-effort ke salah satu tahap
+        # resmi lewat pesan exception. --
+        try:
+            pipeline_result = pipeline_module.run_pipeline(doc_path, template_path=template_path)
+            result["pipeline_success"] = True
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            result["failure_stage"] = _map_pipeline_failure_stage(reason)
+            result["failure_reason"] = reason
+            result["processing_time_sec"] = round(time.time() - t0, 2)
+            _save_debug(debug_dir, record, aligned_img, regions)
+            return result
+    else:
+        # -- V19 API engines: alignment/localization tidak berlaku (tidak
+        # ada konsep template utk Gemini/Mistral) -- panggil extractors.run()
+        # LANGSUNG, satu dispatch, tidak ada fallback diam-diam ke engine
+        # lain kalau gagal (lihat extractors.py). --
+        result["load_success"] = True
+        result["alignment_status"] = "not_applicable"
+        result["region_status"] = "not_applicable"
+        try:
+            pipeline_result = extractors.run(engine, doc_path)
+            result["pipeline_success"] = True
+        except extractors.ExtractorError as exc:
+            result["failure_stage"] = exc.stage
+            result["failure_reason"] = f"{type(exc).__name__}: {exc}"
+            result["processing_time_sec"] = round(time.time() - t0, 2)
+            return result
+        except Exception as exc:
+            result["failure_stage"] = "API_RESPONSE"
+            result["failure_reason"] = f"{type(exc).__name__}: {exc}"
+            result["processing_time_sec"] = round(time.time() - t0, 2)
+            return result
 
     result["processing_time_sec"] = round(time.time() - t0, 2)
 
@@ -532,6 +571,12 @@ def main():
                          help="Override pipeline_module.VLM_FALLBACK_ENABLED (kalau modulnya punya atribut ini) "
                               "-- mis. 'off' utk mengukur akurasi PaddleOCR SENDIRIAN vs 'on' dgn fallback VLM, "
                               "dgn --pipeline yg sama")
+    parser.add_argument("--engine", default="v18", choices=list(extractors.ENGINES),
+                         help="V19 -- SATU extractor benchmark utk seluruh run (default: 'v18', pipeline lama "
+                              "TIDAK berubah). 'gemini-3.8-flash' memanggil API eksternal LANGSUNG (tanpa "
+                              "ROI/template/OCR V18, lihat extractors.py) -- butuh GEMINI_API_KEY di environment "
+                              "(lihat .env.example); 'qwen3_vl' memanggil Hugging Face hosted inference -- butuh "
+                              "HF_TOKEN. TIDAK PERNAH menjalankan >1 engine dlm satu run ini.")
     parser.add_argument("--output-csv", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
@@ -559,9 +604,11 @@ def main():
               file=sys.stderr)
         try:
             res = evaluate_record(record, template_img, template_path, debug_dir,
-                                   debug_failed_only=not args.debug_all, pipeline_module=pipeline_module)
+                                   debug_failed_only=not args.debug_all, pipeline_module=pipeline_module,
+                                   engine=args.engine)
         except Exception:
             res = _blank_result(record)
+            res["engine"] = args.engine
             res["failure_stage"] = "PIPELINE"
             res["failure_reason"] = f"unhandled_exception: {traceback.format_exc(limit=2)}"
         results.append(res)
@@ -570,6 +617,7 @@ def main():
     summary = build_summary(results)
     summary["run_label"] = args.label
     summary["pipeline_module"] = args.pipeline
+    summary["engine"] = args.engine
     summary["vlm_fallback_enabled"] = vlm_fallback_enabled
     Path(args.output_json).write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 

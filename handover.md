@@ -1,6 +1,6 @@
 # HANDOVER — OCR Pipeline Preprocessing & Evaluation
 
-**Last update:** 10 September 2026 (V18)
+**Last update:** 14 September 2026 (V19e -- local Qwen3-VL-2B pada GPU 2GB TERBUKTI tidak usable, engine "qwen3_vl_local" ditambahkan sbg opsi terpisah, lihat §9e; V19c -- ganti engine "qwen2_vl" lokal jadi "qwen3_vl" Hugging Face HOSTED, lihat §9c; V19 -- Qwen2-VL direct-semantic pipeline + Gemini token/cost tracking, lihat §9b)
 **Baca urutan:** 1 (deskripsi) → 2 (state) → 3 (next steps) → sisanya kalau perlu detail.
 **Prinsip kerja:** MEASURE → FIND ROOT CAUSE → FIX → RE-EVALUATE. **Satu perubahan
 kecil, satu pengukuran full 25-dokumen, baru lanjut** — V14 sengaja hanya 1 fix
@@ -104,7 +104,7 @@ tapi terbukti regresi di `placement_area` (lihat §4, dilarang diulang) krn box
 beda dari identity_area yg murni 3 baris teks tanpa choice box.
 
 **Hasil terverifikasi** (`evaluation.py`, full 25 dokumen, 1 evaluator per run —
-lihat §9 poin 7 soal RAM):
+lihat §10 poin 7 soal RAM):
 
 | Metrik | V13 (`fixed_v13`) | V14 (`roi_clamp_identity_only`) |
 |---|---|---|
@@ -147,7 +147,7 @@ kategori di bawah): 11/25 (44%) bersih, **6/25 (24%) "block-shift"** (records
 DAN placement_area jatuh di teks judul/paragraf, field asli TANPA box sama
 sekali), 5/25 (20%) residual row-drift (sisa dari V14, lihat §3), 1/25 (4%)
 rotasi tak terkoreksi (record 6). User minta 4 hal sekaligus (bukan 1 spt V14 —
-lihat instruksi eksplisit di §14):
+lihat instruksi eksplisit di §15):
 
 **4a. Title anchor (root cause block-shift).** Judul cetak "FORMULIR
 KEIKUTSERTAAN"/"Program BRI CUAN HADIAH 2026" (bbox normalized diukur langsung
@@ -277,7 +277,7 @@ sebelumnya kalau ketemu, sudah digantikan:**
 | nominal_penempatan accuracy | 0.2381 (5/21) | 0.2381 (5/21) | **0.3043 (7/23)** |
 | tenor_penempatan accuracy | 0.80 (4/5) | 0.80 (4/5) | 0.80 (4/5) — unchanged |
 | bentuk_reward accuracy | 1.00 (10/10) | 1.00 (9/9) | 1.00 (9/9) — unchanged |
-| decision_accuracy | 0.16 | 0.16 | 0.16 — unchanged (lihat §9 poin 6) |
+| decision_accuracy | 0.16 | 0.16 | 0.16 — unchanged (lihat §10 poin 6) |
 | review_rate | 0.0 | 0.0 | **0.12** — dokumen ambigu sekarang jujur masuk REVIEW, bukan dipaksa OK/TOLAK |
 
 File bukti: `eval_runs/evaluation_summary_v15_1_dy_fix.json` (FINAL, dipakai). File V15
@@ -293,7 +293,7 @@ naik dari 0 ke 0.12 adalah sinyal SEHAT (bukan regresi) — sebelumnya semua
 dokumen dipaksa OK/TOLAK tegas walau datanya ambigu; sekarang beberapa
 record correctly masuk status "perlu direview" krn ROI sekarang benar-benar
 merefleksikan ketidakpastian yg genuine. `decision_accuracy` belum bergerak
-krn 7-check-nya sendiri masih ketat — lihat §9 poin 6, bukan soal ROI lagi.
+krn 7-check-nya sendiri masih ketat — lihat §10 poin 6, bukan soal ROI lagi.
 
 ## 5. V15.2 — Output Structure + Field Quality Gate (Leakage) + Stop Always-Visible
 
@@ -489,7 +489,7 @@ tersembunyi di full-run 25 dokumen. Full evaluation (`v16_final` vs
 | bentuk_reward accuracy | 1.00 | 1.00 (unchanged) |
 | all_5_fields_exact | 0.00 | 0.04 |
 | all_7_checks_exact | 0.04 | 0.04 (unchanged) |
-| decision_accuracy | 0.16 | 0.16 (unchanged — lihat §9 poin 6, di luar scope sesi ini) |
+| decision_accuracy | 0.16 | 0.16 (unchanged — lihat §10 poin 6, di luar scope sesi ini) |
 | false_reject_rate | 0.8182 | 0.7727 |
 | review_rate | 0.12 | 0.16 |
 
@@ -516,7 +516,7 @@ evaluation 25 dokumen.
 per-baris → drift → `_clamp_field_box_y` motong jadi sliver) BENAR sbg
 GEJALA, tapi fix yg direncanakan (rescue via `prep.resolve_roi()` per-field,
 dianggap "evidence independen") **DIUJI isolated & TERBUKTI TIDAK CUKUP** —
-lihat §10 utk detail debug trace. Root cause SEBENARNYA, ditemukan lewat debug
+lihat §11 utk detail debug trace. Root cause SEBENARNYA, ditemukan lewat debug
 trace nilai dx/dy aktual (BUKAN dari nextupdate.md): `PREV_FIELD_BOTTOM_NORM`/
 `NEXT_FIELD_TOP_NORM` (batas tetangga, dipakai `_clamp_field_box_y`) dihitung
 di koordinat TEMPLATE (tanpa shift) — kalau section transform-nya sendiri
@@ -571,7 +571,7 @@ utk 5 field yg diukur, nol regresi murni):**
   baris `unit_kerja` yg sehat), TAPI tulisan tangan nasabah-nya sendiri
   TIDAK persis duduk di baris cetak yg diasumsikan template (record 9
   `nama_nasabah` membaca digit, bukan nama) — ini limitasi TERPISAH yg
-  SUDAH didokumentasikan (§9 poin 5, per-baris ink-band localization),
+  SUDAH didokumentasikan (§10 poin 5, per-baris ink-band localization),
   BUKAN regresi dari fix ini. `nomor_rekening` accuracy TURUN secara %
   (0.5789→0.5238) krn DENOMINATOR naik (19→21, 2 record yg dulu blank
   sekarang measurable) sementara match count TETAP 11 — lebih banyak
@@ -585,7 +585,7 @@ utk 5 field yg diukur, nol regresi murni):**
   vs teks OCR sendiri tidak sepakat) — indikasi record ini SUDAH
   borderline/fragile sebelum V17, kemungkinan besar sensitif thd
   variasi environment kecil (record 20 JUGA satu2nya yg title-anchornya
-  gagal match, §9 poin 3). Dicatat sbg prioritas terpisah (§9 poin 9),
+  gagal match, §10 poin 3). Dicatat sbg prioritas terpisah (§10 poin 9),
   BUKAN diklaim sbg "fixed" atau disembunyikan.
 
 **Finding 2 — placement_area title-anchor, KONFIRMASI (tidak ada perubahan
@@ -686,7 +686,7 @@ bukan salah menyalahkan "tidak ada tanda tangan").
 **Metodologi evaluasi (baca sebelum re-run)**: mesin ini mengalami OOM
 BERULANG KALI sesi ini bahkan utk SATU proses evaluator (`--limit 5`
 sekalipun) krn RAM sistem yg dipakai aplikasi lain user turun ke <1GB
-sesaat — lihat §11 utk workaround batch-subprocess (evaluasi 25 dokumen
+sesaat — lihat §12 utk workaround batch-subprocess (evaluasi 25 dokumen
 INI dijalankan lewat 6 batch kecil, hasil digabung via
 `evaluation.build_summary()`/`write_csv()` yg SAMA, bukan reimplementasi
 logic). **`average_processing_time_sec` di `evaluation_summary_v17_final.
@@ -727,7 +727,7 @@ NAMA" TIDAK didukung data keras (nomor_rekening_extracted record 18='5',
 record 23='N/A', record 24='511' — bukan nama sama sekali). Fix 3 di-rescope
 HANYA berdasar bukti yg benar2 bertahan cross-check (record 9 & 13), teori
 lebih luas utk 1/18/23/24 didemosikan jadi hipotesis-belum-terkonfirmasi.
-**Pelajaran (baca §10 utk entry lengkap)**: laporan visual-only dari
+**Pelajaran (baca §11 utk entry lengkap)**: laporan visual-only dari
 sub-agent BISA salah baca isi kotak kecil/skew — SELALU cross-check thd data
 keras (ground truth/extracted value) sebelum mendesain fix, jangan percaya
 1 sumber laporan begitu saja walau detail & meyakinkan.
@@ -821,7 +821,7 @@ run penuh SETELAH Fix 3):**
 
 **Hasil full evaluation (`eval_runs/evaluation_summary_v18_final.json` vs
 `_v17_final.json`, 25 dokumen, dijalankan via 6 batch-subprocess terpisah —
-lihat §11 catatan RAM):**
+lihat §12 catatan RAM):**
 
 | metrik | V17 | V18 |
 |---|---|---|
@@ -866,7 +866,7 @@ memakai raw_results langsung, bukan cuma evaluation.py):**
   Rekening (ogur) Unit tes'` — BEDA jenis masalah (fragmen LABEL "Pengelola
   Rekening" yg bocor, alpha-dominant jadi LOLOS gate Fix 3 walau isinya tetap
   salah) — **BELUM diperbaiki, masalah BARU & berbeda dari digit-leak**,
-  prioritas terpisah utk sesi depan (lihat §9).
+  prioritas terpisah utk sesi depan (lihat §10).
 - **Hipotesis "box unit_kerja/nama_nasabah hilang sama sekali" (record
   5/6/10/2) — TERBANTAH oleh data keras.** `roi_bbox` diukur langsung utk
   keempatnya: SEMUA berukuran NORMAL (24-26px, TIDAK collapse/degenerate) —
@@ -876,7 +876,7 @@ memakai raw_results langsung, bukan cuma evaluation.py):**
   `'Pengelola Rekening'` — SAMA PERSIS pola label-bleed record 24 di atas
   (fragmen label bocor, bukan box hilang). Kesimpulan: laporan visual "kotak
   tidak ada" dari sub-agent audit TIDAK AKURAT utk ke-4 record ini —
-  pelajaran metodologi, lihat catatan di atas & §10.
+  pelajaran metodologi, lihat catatan di atas & §11.
 - **Record 19/20 (dugaan "seluruh blok identity_area salah tempat total")
   — record 20 TETAP kasus lama yg belum terselesaikan (`method=
   consensus_translation`, TIDAK berubah); record 19 TERNYATA BUKAN regresi
@@ -893,7 +893,837 @@ memakai raw_results langsung, bukan cuma evaluation.py):**
 File bukti (semua di `eval_runs/`): `evaluation_summary_v18_final.json`/
 `evaluation_results_v18_final.csv` (FINAL, dibanding thd `_v17_final`).
 
-## 9. Prioritas Berikutnya (berdasar data V15.2/V17/V18 di atas, BUKAN tebakan)
+## 9. V19 — Multi-Extractor Benchmark (V18 + Gemini 3.8/2.5 Flash + Mistral OCR 4.1)
+
+**Tujuan**: benchmark V18 (pipeline deterministik: template alignment + ROI +
+PaddleOCR + fallback VLM) thd 3 API AI eksternal (2 model Gemini, 1 model
+Mistral OCR), pakai LOGIC PERBANDINGAN/KEPUTUSAN yg SAMA PERSIS
+(`comparison.py`, TIDAK diubah sesi ini), dgn jaminan TEPAT SATU extractor
+jalan per dokumen/request — TIDAK PERNAH fan-out, TIDAK PERNAH fallback diam2
+antar engine. V18 TETAP baseline, internal-nya (preprocessing/alignment/ROI/
+PaddleOCR/VLM fallback) TIDAK disentuh sama sekali.
+
+**Arsitektur — modul baru `extractors.py`**: `run(engine, document_path,
+progress_callback=None, reference_record=None)` adalah SATU-SATUNYA titik
+masuk yg dipanggil `app.py`/`evaluation.py` — dispatcher if/elif/else, TEPAT
+1 cabang jalan per panggilan:
+- `run_v18(...)` — passthrough TIPIS ke `pipeline.run_pipeline()` (SAMA
+  persis argumen, TIDAK ada logika baru). **Diverifikasi (bukan diasumsikan)**:
+  `extractors.run("v18", doc_path)` vs `pipeline.run_pipeline(doc_path)`
+  langsung, dibandingkan field-per-field (`fields`/`raw_results`/
+  `choice_groups`/`alignment_status`) — **MATCH persis**, jalur V18 SUDAH
+  terbukti tidak berubah perilakunya sama sekali.
+- `run_gemini(...)`/`run_mistral(...)` — baca BYTES dokumen asli LANGSUNG
+  (tanpa `preprocessing.load_document`/alignment/ROI/PaddleOCR sama sekali —
+  itu justru poinnya: mengukur ekstraksi AI NATIVE), panggil API dgn
+  instruksi ekstraksi TUNGGAL yg SAMA (`EXTRACTION_INSTRUCTION`, verbatim dari
+  spesifikasi) + structured JSON output native (BUKAN free-text+regex),
+  parse ke skema kanonik, lalu `adapt_common_to_pipeline_shape()` membangun
+  return-shape yg SAMA PERSIS dgn `pipeline.run_pipeline()`
+  (`fields`/`raw_results`/`choice_groups`/`debug_images`/`alignment`/dst) —
+  dgn REUSE `postprocessing.build_fields_table()` (TIDAK diimplementasi
+  ulang). **`reference_record` TIDAK PERNAH masuk ke signature
+  `run_gemini`/`run_mistral` sama sekali** — kebocoran data referensi scr
+  STRUKTURAL tidak mungkin terjadi utk kedua engine ini (beda dgn `run_v18`
+  yg TETAP menerima param itu krn `pipeline.run_pipeline()` sendiri sudah
+  lama memakainya utk `_run_vlm_reference_check`, fitur V10 yg TIDAK terkait
+  sesi ini).
+- `ExtractorError(message, stage)` — `stage` salah satu `API_AUTH`/
+  `API_RATE_LIMIT`/`API_TIMEOUT`/`API_RESPONSE`. TIDAK PERNAH ditelan diam2,
+  TIDAK PERNAH memicu fallback ke engine lain — cukup propagate, KEDUA
+  pemanggil (`app.py`'s `process_document`/`_process_one_record`, SUDAH ADA
+  sblm sesi ini) SUDAH membungkus panggilan dgn `try/except Exception ->
+  sanitize_error(exc)` generik, jadi kegagalan API otomatis tertangkap TANPA
+  kode error-handling baru di `app.py`.
+
+**Adapter design decision (dokumentasikan jujur, JANGAN disembunyikan)**:
+`comparison.validate_tenor()`/`validate_reward()` didesain utk FORM KERTAS
+("2 bukti independen harus sepakat" — coretan pilihan + rentang tanggal
+tulisan tangan utk tenor; coretan pilihan + field detail terisi utk reward) —
+TIDAK map 1:1 ke satu respons JSON AI.
+- **Tenor — reuse JUJUR, TANPA fabrikasi**: skema kanonik SUDAH punya 2 sinyal
+  independen dari respons AI yg SAMA — `tenor_penempatan` (angka) &
+  `tanggal_mulai`/`tanggal_selesai` (tanggal). Adapter format 2 tanggal itu
+  jadi teks (mis. "1 Januari 2026 s/d 1 April 2026") yg **diverifikasi
+  parseable** oleh `postprocessing.derive_tenor_from_range()`/
+  `_extract_dates()` yg SUDAH ADA (REUSE, bukan ditulis ulang) — kalau angka
+  tenor & rentang tanggal versi AI sendiri TIDAK sepakat, `validate_tenor`
+  BENAR menandai TOLAK (menangkap inkonsistensi internal AI sungguhan, bukan
+  workaround).
+- **Reward — simplifikasi jujur, BUKAN fabrikasi data baru**: skema kanonik
+  cuma punya SATU nilai `bentuk_reward` (tidak ada field detail terpisah spt
+  form kertas), tapi `validate_reward` butuh sinyal KEDUA "field detail
+  terisi". Adapter mencerminkan nilai `bentuk_reward` yg SAMA ke slot
+  `reward_tunai`/`reward_non_tunai` yg sesuai (BUKAN data baru, cuma
+  menaruh nilai yg SAMA di slot ke-2 yg diminta check lama) supaya check
+  tidak salah melaporkan REVIEW utk SETIAP record engine API. **Ini
+  simplifikasi yg diketahui & disengaja** — tidak ada sinyal independen
+  kedua yg genuine utk ekstraksi AI seluruh-dokumen, dicatat di komentar
+  `extractors.py` (`adapt_common_to_pipeline_shape`'s docstring) & di sini.
+
+**Verifikasi (SEMUA dijalankan, bukan diasumsikan — lihat catatan jujur di
+bawah soal yg BELUM bisa diverifikasi):**
+1. Syntax + import check `extractors.py`/`app.py`/`evaluation.py` — semua OK.
+2. `extractors.run("v18", doc_path)` vs `pipeline.run_pipeline(doc_path)`
+   langsung, record 12 — **MATCH persis** (lihat di atas).
+3. Adapter end-to-end: JSON kanonik sintetis (`nama_nasabah`/`nomor_rekening`/
+   dst lengkap) → `adapt_common_to_pipeline_shape()` → `comparison.
+   _compute_all_checks()` LANGSUNG — SEMUA 5 field OK/checks bekerja benar,
+   tenor cross-check (angka vs rentang tanggal) BERHASIL sepakat (3 bulan =
+   3 bulan), signature "uncertain" BENAR jadi REVIEW. Membuktikan integrasi
+   adapter->comparison.py bekerja, bukan cuma "tidak crash".
+4. `extractors.run("gemini-3.8-flash", ...)`/`("mistral-ocr-4-1", ...)` TANPA
+   `GEMINI_API_KEY`/`MISTRAL_API_KEY` (env kosong) — KEDUANYA raise
+   `ExtractorError(stage="API_AUTH")` dgn pesan jelas, BUKAN crash/stack
+   trace mentah.
+5. `python evaluation.py --engine gemini-3.8-flash --limit 1` &
+   `--engine mistral-ocr-4-1 --limit 1` (tanpa API key) — KEDUANYA selesai
+   TANPA crash, `failure_stage_breakdown.API_AUTH == 1`, summary JSON valid
+   (`"engine"` tercatat benar).
+6. `python evaluation.py --engine v18 --limit 1` (SETELAH restrukturisasi
+   `evaluate_record`) — `pipeline_success_rate=1.0`/`alignment_success_rate=
+   1.0` SAMA spt sebelum sesi ini (record 1, hasil field akurasi SAMA dgn
+   histori) — membuktikan cabang `if engine=="v18"` di `evaluate_record`
+   (ALIGNMENT/LOCALIZATION/`pipeline_module.run_pipeline` verbatim, TIDAK
+   diubah) genuinely tidak ter-regresi oleh restrukturisasi jadi if/else.
+7. JS: syntax-check via Node (`new Function(code)`) + HTML tag-balance check
+   utk `static/index.html` — keduanya OK.
+
+**BELUM diverifikasi (jujur, TIDAK diklaim selesai)**: TIDAK ADA
+`GEMINI_API_KEY`/`MISTRAL_API_KEY` nyata tersedia sesi ini — panggilan API
+SUNGGUHAN (`client.models.generate_content(...)` utk Gemini,
+`client.ocr.process(...)` utk Mistral) **belum pernah benar2 dieksekusi**.
+Bentuk panggilan SDK persis (nama method, kwarg) didasarkan pengetahuan
+SDK `google-genai`/`mistralai` versi terkini SAAT PENULISAN — DIBERI KOMENTAR
+JELAS di `extractors.py` (`run_gemini`/`run_mistral`) utk diverifikasi ulang
+thd versi package yg BENAR2 terpasang sebelum dipercaya di produksi, krn
+`google-genai`/`mistralai` tidak sempat diinstall (tidak ada akses jaringan
+sesi ini utk `pip index`/`pip install` — lihat `requirements.txt`, versi
+sengaja TIDAK di-pin krn tidak bisa diverifikasi thd PyPI). UI selector
+(Tab 1/Tab 2, gate Run+disable saat processing) diverifikasi lewat
+pembacaan kode + syntax/tag-balance check, **BUKAN** lewat klik manual di
+browser sungguhan — kalau ada waktu sesi depan, jalankan `app.py` &
+klik-test langsung.
+
+**File yg diubah/baru**: `extractors.py` (BARU — router + adapter + skema
+kanonik + 2 engine API), `requirements.txt` (+`google-genai`/`mistralai`/
+`python-dotenv`, TIDAK di-pin, lihat catatan di atas), `.env.example`
+(BARU), `.gitignore` (+`.env`), `app.py` (`_run_ocr_and_format` route lewat
+`extractors.run()` bukan `pipeline.run_pipeline()` langsung; `ProcessPayload`/
+`SheetSubmitPayload.engine` baru; `_new_session`/`submit_sheet_batch`/
+`_process_one_record` thread `engine` lewat; beberapa `_ERROR_HINTS` baru),
+`static/index.html` (`engineSelect`/`sheetEngineSelect` baru, `setTab1RunState`/
+`setProcessingState` gate Run+selector pd pilihan extractor, `runRecords`/
+Tab1 fetch kirim `engine`), `evaluation.py` (`--engine` CLI, `evaluate_record`
+di-restrukturisasi if/else per engine SAMBIL mempertahankan cabang v18
+verbatim, `FAILURE_STAGES` +4 stage API, `_blank_result`/summary +`"engine"`).
+
+**TIDAK disentuh (sesuai scope eksplisit)**: `comparison.py` (nol baris
+diubah), `signature_diagnostics.py`/`stage_evaluation.py` (hardcode
+`pipeline.run_pipeline`, di luar scope benchmark (spesifikasi tugas V19 §15) — HANYA
+`evaluation.py --engine` yg diminta), semua masalah V18 yg sudah ada (§10,
+tidak ada satupun di-fix sesi ini).
+
+**Update (sesi lanjutan, `GEMINI_API_KEY`/`mistralai` SUNGGUHAN sudah
+tersedia) — 2 bug nyata ketemu PERSIS di titik yg sudah diperingatkan jujur
+di atas ("verifikasi ulang thd versi package yg BENAR2 terpasang"):**
+
+1. **`run_gemini` crash `pydantic ValidationError` (9 errors) di
+   `client.models.generate_content(...)`.** Root cause: `response_schema`
+   divalidasi google-genai sbg `types.Schema` (Pydantic, OpenAPI-style) —
+   field `type`-nya enum TUNGGAL (`STRING`/`NUMBER`/`INTEGER`/.../`NULL`),
+   TIDAK BISA menerima union JSON-Schema standar (`"type": ["string",
+   "null"]`, yg dipakai `_response_json_schema()` utk SETIAP field Optional).
+   **Fix**: pakai `response_json_schema` (bukan `response_schema`) di
+   `config={}` — field ini dikonfirmasi ADA di `GenerateContentConfig`
+   (`google-genai` 2.22.0), diteruskan APA ADANYA lewat `t_json_schema()`
+   (no-op passthrough, dibaca langsung dari source `_transformers.py`) —
+   BUKAN divalidasi sbg `types.Schema` sama sekali, jadi dialek JSON-Schema
+   standar (termasuk union nullable) valid tanpa konversi apa pun. Skema
+   asli `_response_json_schema()` dipakai APA ADANYA utk Gemini juga
+   sekarang (sebelumnya sempat ada fungsi konversi `_to_gemini_schema()` yg
+   me-rewrite ke dialek `nullable: true` — SUDAH DIHAPUS, jadi dead code
+   sejak `response_json_schema` dipakai; Mistral TIDAK terpengaruh, sudah
+   dari awal pakai dialek JSON-Schema standar yg sama).
+2. **`run_mistral` crash `ImportError: cannot import name 'Mistral' from
+   'mistralai'`.** Root cause: `mistralai` 2.x (yg ter-install dari
+   `mistralai>=1.0` di `requirements.txt`, resolve ke 2.10.0) merestrukturisasi
+   paket — `mistralai` level atas jadi PURE NAMESPACE PACKAGE (tanpa
+   `__init__.py`, `mistralai.azure`/`mistralai.gcp` jadi varian cloud-specific
+   sejajar), class `Mistral` pindah ke `mistralai.client` & TIDAK di-re-export
+   lagi di level atas — import lama (`from mistralai import Mistral`, valid
+   di 1.x) diam2 resolve ke namespace kosong. **Fix**: `from mistralai.client
+   import Mistral`. `client.ocr.process(...)`/`document_annotation_format`
+   dikonfirmasi masih kompatibel (signature method dicek via `inspect.
+   signature`, key `"schema"` dlm payload dikonfirmasi match lewat Pydantic
+   alias `schema_definition` punya `alias="schema"` — TIDAK perlu diubah).
+
+**Verifikasi fix ini**: `types.GenerateContentConfig(response_mime_type=...,
+response_json_schema=schema)` dibangun tanpa error (dicek langsung, bukan
+diasumsikan) — SEBELUM & SESUDAH `pip install --upgrade google-genai
+pydantic` (hasil: google-genai TETAP 2.22.0 [sudah terbaru], pydantic
+2.13.4→2.13.5). End-to-end SUNGGUHAN dicoba (`extractors.run_gemini(doc_path,
+model="gemini-2.5-flash")` thd record nyata dari `assets/ocr_evaluation.xlsx`,
+`GEMINI_API_KEY` asli terbaca dari `.env`) — **schema error TIDAK MUNCUL
+LAGI**, request berhasil dibangun & benar2 dikirim (lolos sampai lapisan
+HTTP), TAPI gagal di `httpx.ConnectError: [Errno 11001] getaddrinfo failed`
+— **sandbox dev environment sesi ini TIDAK PUNYA akses internet keluar**
+(sama kategori limitasi dgn VLM/torch yg sudah dicatat berkali-kali di
+handover versi sebelumnya) — BUKAN bug kode, respons SUNGGUHAN dari Gemini
+belum bisa diverifikasi round-trip penuh di sini. **Jangan klaim "Gemini
+sudah jalan end-to-end"** sampai dicoba di environment dgn akses internet.
+
+**Item yg SENGAJA TIDAK diubah (diminta, tapi premisnya tidak cocok kode
+nyata — dicek dulu, bukan dituruti buta)**:
+- Tidak ada `ExtractionResult` (Pydantic model) di mana pun di codebase ini
+  — skema dibangun manual sbg dict via `_response_json_schema()`. Parsing
+  `json.loads(response.text)` (sudah ada) tetap dipakai, BUKAN diganti
+  `ExtractionResult.model_validate_json(...)` — tidak ada model itu utk
+  divalidasi. Kalau validasi tipe-kuat via Pydantic memang diinginkan, itu
+  perubahan desain terpisah (bikin model baru + migrasi adapter), bukan
+  bagian dari fix bug ini.
+- `_classify_api_exception` SUDAH BENAR (dicek ulang): hanya keyword auth
+  eksplisit (`unauthorized`/`invalid api key`/`401`/`403`/dst) yg
+  menghasilkan `API_AUTH` — error skema/response SUDAH jatuh ke
+  `API_RESPONSE` (bukan `API_AUTH`) SEBELUM sesi ini. Traceback yg
+  menunjukkan `"GEMINI_API_KEY environment variable is not set"`
+  berdampingan dgn error skema kemungkinan besar hasil paste 2 run TERPISAH
+  yg tercampur (kode-nya cuma raise pesan itu di 1 titik, SEBELUM panggilan
+  API apa pun, independen dari error skema) — bukan bug klasifikasi nyata.
+- `ocr_meta["engine"] = "v18"` yg dicurigai ada di `run_gemini` — DICEK,
+  baris itu ADA tapi di dalam `run_v18()` (§9 poin `run_v18`), BUKAN
+  `run_gemini`. `run_gemini` SUDAH benar via `adapt_common_to_pipeline_shape`
+  (`ocr_meta = {"engine": source, ...}` dgn `source=model`, mis.
+  "gemini-2.5-flash") — granularitas per-MODEL ini SENGAJA (tujuan V19 adl
+  benchmark ANTAR MODEL, bukan cuma antar provider), bukan bug.
+
+## 9b. V19 (lanjutan) — Qwen2-VL Direct-Semantic Pipeline + Gemini Token/Cost Tracking (SELESAI, terverifikasi sebagian)
+
+Lanjutan §9 di atas (engine router/adapter/canonical schema SUDAH ada dari
+sesi sebelumnya, TIDAK diubah strukturnya) -- menambahkan 2 hal terpisah
+diminta user: (1) `qwen2_vl` sbg engine ke-5 (PRIMARY EXPERIMENTAL, direct
+semantic, TANPA ROI/PaddleOCR/label coordinate -- beda total dari V10/V12
+VLM FALLBACK yg sudah ada di `pipeline.py`/`vlm.py`, itu tetap tidak
+disentuh), (2) Gemini token usage + cost tracking (config.py baru + UI +
+export).
+
+**File baru:** `config.py` (Gemini pricing/USD-IDR rate, MUDAH diupdate,
+lihat komentar di file itu -- angka BELUM diverifikasi thd halaman pricing
+resmi Gemini terkini, sandbox sesi ini sempat tanpa akses jaringan lalu
+TERNYATA ada akses -- lihat poin torchvision di bawah -- tapi harga Gemini
+sendiri tidak dicek ulang thd dokumentasi resmi, cuma best-effort).
+
+**1. Qwen2-VL primary engine (`extractors.run_qwen_vlm`, `vlm.
+extract_direct_semantic`).** Alur: `extractors._qwen_prepare_image()`
+(PDF->image via `prep.load_document` yg SUDAH ada -- reuse, TIDAK
+alignment; foto: `PIL.ImageOps.exif_transpose` utk EXIF orientation, TANPA
+deskew/threshold/binarize/crop) -> `vlm.extract_direct_semantic()` (SATU
+panggilan model, prompt PERSIS spesifikasi task + skema JSON `{value,
+confidence}` per field dilampirkan supaya model consistent -- model TIDAK
+support constrained/structured JSON decoding native spt Gemini, jadi
+skema dilampirkan sbg teks, pola yg SAMA dgn `INDEPENDENT_READ_PROMPT_
+TEMPLATE`/`FULLPAGE_PROMPT_TEMPLATE` yg sudah ada) -> `extractors.
+_adapt_qwen_to_common()` (map ke skema kanonik `COMMON_FIELDS` yg SAMA dgn
+Gemini/Mistral, field yg TIDAK ada di skema Qwen -- unit_kerja/tanggal_
+mulai/tanggal_selesai -- diisi not_detected/null, BUKAN ditebak) ->
+`adapt_common_to_pipeline_shape()` (REUSE PERSIS, tanpa cabang baru).
+
+**Fallback (task spec §6, SATU-SATUNYA pengecualian thd prinsip "1 engine
+per panggilan, tidak pernah fallback diam2 antar engine" §9 di atas):**
+`run_qwen_vlm` menangkap SEMUA exception dari persiapan gambar ATAU
+inferensi Qwen (model/dependensi tidak ada, JSON tidak bisa di-parse, dll)
+-> panggil `run_v18()` (pipeline OCR/ROI yg SUDAH ADA, TIDAK diubah) sbg
+fallback, TIDAK PERNAH ke Gemini/Mistral, TIDAK PERNAH dijalankan
+mendahului Qwen. Label fallback (`ocr_meta["fallback_source"]`) dipetakan
+dari `source` per-field yg SUDAH ADA di `pipeline.py` (`ocr_primary`/
+`vlm_fullpage` -> "OCR Fallback", `roi_template`/`roi_second_pass_vlm` ->
+"ROI Fallback") -- perkiraan KASAR (SATU label utk seluruh dokumen, bukan
+per-field), didokumentasikan sbg itu, bukan klaim presisi granular. Kalau
+Qwen SUKSES, `fallback_source = "Qwen VLM"`.
+
+**Batasan jujur, disengaja (BUKAN bug, DIDOKUMENTASIKAN di kode
+`extractors._adapt_qwen_to_common` docstring juga):** skema wajib Qwen
+(task spec §2) TIDAK punya tanggal_mulai/tanggal_selesai -- akibatnya
+`comparison.validate_tenor()` (TIDAK diubah, tetap butuh 2 bukti independen
+choice+rentang tanggal) SELALU jatuh ke cabang "rentang tanggal tidak
+terbaca" -> `tenor_penempatan` **SELALU REVIEW** utk engine `qwen2_vl`,
+terlepas seberapa yakin/benar choice number-nya. Ini konsekuensi nyata dari
+skema Qwen yg fixed sesuai spesifikasi (sama kategori dgn simplifikasi
+Reward Gemini/Mistral di §9), BUKAN sesuatu yg "diperbaiki" dgn
+mengarang rentang tanggal yg Qwen tidak pernah diminta ekstrak.
+
+**Verifikasi NYATA (bukan cuma baca kode -- dijalankan sungguhan sesi
+ini):**
+1. Model lokal (`models/Qwen2-VL-2B-Instruct/`, weights LENGKAP ada di
+   mesin ini) berhasil di-load LEWAT `vlm._load()` yg SUDAH ADA (reuse,
+   TIDAK diubah loading logic-nya) -- **SETELAH fix dependency nyata**:
+   `transformers` 5.17.0 di venv ini butuh `torchvision` (import error
+   `Qwen2VLVideoProcessor requires the Torchvision library`, muncul saat
+   `AutoProcessor.from_pretrained` resolve video-processor Qwen2-VL walau
+   TIDAK ada video yg dipakai) -- **TERNYATA sandbox sesi ini PUNYA akses
+   jaringan** (beda dari kondisi "tidak ada akses internet" yg dicatat sesi
+   V19 sebelumnya utk Gemini/Mistral, lihat §9 di atas -- kemungkinan
+   kondisi jaringan environment berubah antar sesi, JANGAN asumsikan salah
+   satu kondisi tanpa cek ulang), `pip install torchvision` berhasil ->
+   ditambahkan ke `requirements.txt` (`torchvision>=0.19`, dgn komentar
+   penjelasan root cause).
+2. Inferensi SUNGGUHAN dijalankan (`extractors.run_qwen_vlm` end-to-end,
+   `downloaded_documents/13EQ77C6tOZoWZ-vN4HEmn6BO7qsB0hNB`) -- **CPU-only
+   (mesin sandbox ini TIDAK punya CUDA, beda dari environment produksi yg
+   punya GPU MX230 2GB, lihat §14), elapsed 1640 detik (~27 menit) utk SATU
+   dokumen** -- jauh lebih lambat drpd PaddleOCR/ROI (~11 detik/dokumen,
+   §2). **CATATAN PENTING utk sesi depan**: JANGAN coba jalankan
+   `evaluation.py --engine qwen2_vl` 25-dokumen penuh di mesin CPU-only spt
+   ini tanpa estimasi waktu dulu (~27 menit x 25 = ~11+ jam) -- kalau perlu
+   benchmark akurasi Qwen scr formal, jalankan di mesin dgn GPU dulu.
+3. Model MENGHASILKAN JSON valid & bisa di-parse (`vlm._extract_json`
+   berhasil, termasuk membuang markdown code-fence \`\`\`json yg
+   dihasilkan model) -- TAPI menjawab **flat** (`{"nama": null, ...}`),
+   BUKAN wrapped `{"value":.., "confidence":..}` spt yg diminta skema di
+   prompt. **Bug NYATA ditemukan & diperbaiki dari temuan ini**:
+   `extract_direct_semantic` sebelumnya HANYA menerima bentuk wrapped
+   (`isinstance(item, dict)`), kalau model menjawab flat scalar maka value
+   asli DIBUANG diam2 jadi `None`/confidence 0 walau model sebenarnya
+   menjawab sesuatu yg valid (mis. angka/boolean). Fix: fallback ke value
+   flat (pola yg SAMA dgn `extract_fields_independent`/`extract_fields_
+   fullpage` yg sudah ada di file yg sama) kalau bentuknya bukan dict --
+   confidence tetap 0.0 utk kasus ini (model tidak memberi angka self-report
+   sendiri). Diverifikasi via unit test (mock `_infer`, bukan re-run
+   inferensi 27 menit lagi) utk kedua bentuk (flat DAN wrapped) -- keduanya
+   sekarang benar.
+4. Utk dokumen NYATA yg diuji, model menjawab **SEMUA field null/false**
+   (genuinely uncertain menurut model sendiri, sesuai instruksi prompt "use
+   null when uncertain, do not guess" -- BUKAN crash/parsing gagal).
+   **Jujur, BELUM disimpulkan** apakah ini krn (a) resolusi turun ke
+   `MAX_SIDE_FULL=1600` (sama dgn V12 fullpage fallback yg sudah ada)
+   terlalu kecil utk tulisan tangan dokumen ini scr spesifik, (b) model 2B
+   genuinely terlalu kecil utk baca dokumen form Indonesia penuh dlm SATU
+   pass tanpa ROI/crop (ITU JUSTRU pertanyaan eksperimen utama V19, lihat
+   §1 spesifikasi task), atau (c) idiosinkrasi 1 dokumen ini saja. **Sample
+   size = 1 dokumen** -- BUKAN kesimpulan benchmark akurasi, cuma bukti
+   pipeline-nya BEKERJA end-to-end tanpa crash. Benchmark akurasi formal
+   (`evaluation.py --engine qwen2_vl` full 25 dokumen) BELUM dijalankan
+   (lihat poin waktu di atas) -- prioritas sesi depan kalau ada akses GPU.
+5. Hasil model (SEMUA null, dari poin 4) diverifikasi end-to-end lewat
+   `extractors.run("qwen2_vl", ...)` PENUH (pakai `_qwen_prepare_image`
+   ASLI thd dokumen nyata, `vlm._infer` di-mock supaya tidak re-run 27
+   menit) -> `adapt_common_to_pipeline_shape` -> `comparison.
+   compute_decision()` -- **TIDAK crash**, SEMUA field jatuh ke status yg
+   BENAR (`not_detected`/`review`), decision akhir **REVIEW** dgn alasan
+   per-field yg masuk akal ("Nama Nasabah tidak terbaca dari dokumen",
+   dst) -- BUKAN salah dipaksa OK/TOLAK. Membuktikan integrasi validasi
+   bekerja BENAR walau model-nya sendiri tidak yakin.
+6. Jalur fallback (Qwen gagal total -> v18) diverifikasi terpisah (mock
+   `vlm.extract_direct_semantic` raise exception) -- `run_v18()` terpanggil
+   benar, `ocr_meta["fallback_source"]` terisi label yg masuk akal,
+   `primary_engine_attempted`/`primary_engine_error` tercatat.
+7. Regresi Gemini/Mistral: `extractors.run("gemini-2.5-flash"/
+   "mistral-ocr-4-1", ...)` TANPA API key -- KEDUANYA tetap
+   `ExtractorError(stage="API_AUTH")` yg bersih, SAMA spt sebelum sesi ini
+   (`_field_entry`/`put()` yg diubah utk menyalurkan confidence Qwen TIDAK
+   mengubah perilaku Gemini/Mistral -- `.get("confidence")` mengembalikan
+   `None` sesuai desain, dicek scr eksplisit).
+8. `run_v18()` (fungsi itu sendiri) **TIDAK disentuh sama sekali** sesi ini
+   (dicek lewat riwayat edit sesi ini, BUKAN git diff -- `extractors.py`
+   sendiri masih untracked dari sesi sebelumnya jadi `git diff` thd file
+   itu tidak menunjukkan apa2 scr default). **Dicoba** membandingkan
+   `extractors.run("v18", doc)` vs `pipeline.run_pipeline(doc)` langsung
+   (2x eksekusi PENUH pipeline V18+VLM fallback internal pd dokumen yg
+   sama) -- `raw_results` MATCH persis, TAPI `fields` (list) TIDAK persis
+   sama. **Proses kedua sempat di-kill sistem krn low memory** (mesin ini
+   ~8GB RAM, SUDAH didokumentasikan §10 poin 7/§12 -- JANGAN ulangi
+   pola ini, 2 instance PaddleOCR+VLM sekaligus). Diagnosis TIDAK
+   dituntaskan (butuh proses ke-3 yg dibatalkan krn risiko OOM), tapi
+   `raw_results` (dict, sumber data mentah) MATCH persis mengindikasikan
+   ini kemungkinan besar **non-determinisme run-to-run yg SUDAH
+   didokumentasikan sebelumnya** (§8/§10 poin 12: "kemungkinan efek tidak
+   langsung...atau non-determinisme OCR/GPU") pada pipeline V18 ITU
+   SENDIRI (dipicu jalur VLM fallback internal V10/V12 yg SUDAH ada,
+   `vlm_fullpage_fallback.used=True` pd dokumen ini) -- **BUKAN regresi
+   dari sesi ini** (`run_v18()` verbatim tidak diubah, dicek di atas).
+   **Belum dituntaskan jujur** -- kalau ada waktu sesi depan & RAM cukup,
+   ulangi dgn 2 proses Python TERPISAH (bukan 1 proses 2x panggilan, pola
+   §12) supaya lebih aman scr memori, lalu diff field-per-field spt yg
+   sempat dimulai sesi ini.
+
+**File yg diubah/baru (sesi ini):**
+- `config.py` (BARU) -- `GEMINI_PRICING`/`GEMINI_DEFAULT_PRICING`/
+  `USD_IDR_RATE`.
+- `vlm.py` -- `DIRECT_SEMANTIC_FIELDS`/`DIRECT_SEMANTIC_PROMPT`/
+  `_clean_confidence`/`extract_direct_semantic` (BARU, lihat poin 3 di atas
+  utk bugfix flat-vs-wrapped).
+- `extractors.py` -- `_field_entry`/`put()` diperluas thread confidence
+  (backward-compatible, Gemini/Mistral tetap `None`); `_compute_gemini_cost`
+  (BARU, baca `config.py`); `run_gemini` capture `response.usage_metadata`
+  -> `result["gemini_usage"]` (top-level, HANYA ada kalau Gemini beneran
+  dipanggil); `QWEN_FALLBACK_SOURCE_LABELS`/`QWEN_UNCERTAIN_CONFIDENCE`/
+  `_qwen_prepare_image`/`_adapt_qwen_to_common`/`run_qwen_vlm` (BARU);
+  `ENGINE_LABELS`/`ENGINES` +`"qwen2_vl"`; router `run()` skrg assign lalu
+  return SATU kali (bukan return langsung tiap cabang) supaya bisa stamp
+  `ocr_meta["version"]="v19"` utk SEMUA engine termasuk v18 (task spec §5).
+- `app.py` -- `_run_ocr_and_format` return `gemini_usage`/`fallback_source`
+  baru; fallback source Qwen di-append ke `decision_v9_2["notes"]` (HANYA
+  informational, TIDAK mengubah decision -- `comparison.py` nol perubahan);
+  `_compute_session_gemini_summary` (BARU) diselipkan ke response `/api/
+  sheet/batch-status/{id}` sbg `gemini_usage_summary`; `/api/sheet/export/
+  {id}` +9 kolom (`engine`/`model`/`input_tokens`/`output_tokens`/
+  `thinking_tokens`/`total_tokens`/`cost_usd`/`cost_idr`/`fallback_source`,
+  blank/0 utk record non-Gemini).
+- `static/index.html` -- opsi `qwen2_vl` di KEDUA dropdown extractor (Tab 1
+  & Tab 2); panel `.gemini-usage-box` (BARU, CSS+JS) tampil HANYA kalau
+  `gemini_usage`/`gemini_usage_summary` ada (Tab 1 per-dokumen, Tab 2
+  per-record + total sesi via polling `batch-status`).
+- `requirements.txt` -- `+torchvision>=0.19` (fix nyata, lihat poin 1 di
+  atas), komentar VLM section diperbarui sebut V19 Qwen direct-semantic jg
+  pakai dependency yg sama.
+
+**TIDAK disentuh (scope eksplisit, sama spt §9):** `comparison.py`
+(nol baris), `pipeline.py`/`postprocessing.py`/`preprocessing.py` (nol
+baris -- V18 internals tetap utuh), `stage_evaluation.py`/`signature_
+diagnostics.py` (hardcode `pipeline.run_pipeline`, di luar scope).
+`evaluation.py` **TIDAK perlu diubah sama sekali** utk dukung `qwen2_vl`
+-- cabang `else` (non-v18) di `evaluate_record` SUDAH generic (panggil
+`extractors.run(engine, doc_path)` langsung), `--engine` CLI choices sudah
+otomatis ambil dari `extractors.ENGINES` (tuple, skrg 5 entri).
+
+**Prioritas sesi depan (V19 lanjutan, urutan berdasar temuan sesi ini):**
+1. Benchmark akurasi Qwen formal (`evaluation.py --engine qwen2_vl`) di
+   mesin ber-GPU -- 1 sample (poin 4 verifikasi) TIDAK CUKUP utk simpulkan
+   apa pun soal akurasi, cuma bukti pipeline jalan.
+2. Kalau akurasi Qwen rendah scr sistematis stlh benchmark formal, coba
+   naikkan resolusi (`vlm.MAX_SIDE_FULL`, env var `VLM_MAX_SIDE_FULL`
+   SUDAH ada, tinggal ubah env, TIDAK perlu ubah kode) SEBELUM ubah prompt
+   -- ukur dulu efeknya scr terpisah drpd gabung banyak perubahan sekaligus
+   (prinsip §15).
+3. Tuntaskan diagnosis "fields match: False, raw_results match: True" utk
+   `run_v18` (poin 8 verifikasi di atas) dgn 2 proses Python TERPISAH
+   (bukan 1 proses 2x panggilan) supaya aman dari OOM -- kemungkinan besar
+   cuma non-determinisme lama yg sudah didokumentasikan, tapi belum
+   dikonfirmasi tuntas root cause-nya field mana yg beda.
+
+## 9c. V19c — Ganti Qwen2-VL LOKAL (§9b) dgn Qwen3-VL HOSTED via Hugging Face
+(SELESAI, terverifikasi 2 dokumen)
+
+User eksplisit minta engine "qwen3_vl" (dulu "qwen2_vl", §9b) TIDAK LAGI
+memuat model lokal (torch/transformers/`vlm._load()`) -- diganti SATU
+panggilan HTTP ke `Qwen/Qwen3-VL-2B-Instruct` yg di-host Hugging Face,
+via `huggingface_hub.InferenceClient`. **Beda desain sengaja dari §9b**: engine
+ini TIDAK LAGI fallback diam-diam ke `run_v18` kalau gagal -- error asli
+(auth/timeout/bad response) langsung dilempar sbg `ExtractorError`, sesuai
+instruksi eksplisit "no silent fallback for this test".
+
+**File diubah:**
+- `.env.example`/`requirements.txt` -- `HF_TOKEN`/`QWEN_MODEL`/`HF_PROVIDER`
+  (opsional) + `huggingface_hub>=0.26` (TIDAK butuh torch/transformers utk
+  jalur ini -- itu tetap dipakai HANYA oleh V10/V12 VLM fallback lokal yg
+  ADA di dalam `pipeline.py`, tidak disentuh sesi ini).
+- `config.py` -- `QWEN_MODEL_DEFAULT`/`HF_REQUEST_TIMEOUT_S` (60 detik,
+  jangan biarkan proses menggantung lama -- sesuai instruksi).
+- `vlm.py` -- `extract_direct_semantic_hosted()` (baru): encode gambar
+  halaman penuh jadi JPEG data-URI, kirim via `InferenceClient.
+  chat_completion()` pakai prompt/skema `DIRECT_SEMANTIC_PROMPT`/
+  `DIRECT_SEMANTIC_FIELDS` YANG SAMA dgn versi lokal (parsing JSON respons
+  di-share lewat `_parse_direct_semantic_json()`, factored out dari
+  `extract_direct_semantic()` lama supaya kedua jalur identik cara baca
+  JSON-nya). `extract_direct_semantic`/`_load`/`_infer` versi lokal
+  DIBIARKAN ada (tidak dipanggil lagi dari `extractors.py`, didokumentasikan
+  sbg "superseded" di docstring-nya) -- bukan dihapus, supaya perubahan tetap
+  minimal/reversible.
+- `extractors.py` -- `run_qwen_vlm` (lokal, §9b) diganti
+  `run_qwen3_vl_hosted()`; engine id `"qwen2_vl"` -> `"qwen3_vl"` di
+  `ENGINE_LABELS`/dispatch `run()` supaya hasil jelas ter-stamp
+  `source`/`engine` = `"qwen3_vl"` (sesuai permintaan "clearly identify the
+  result as qwen3_vl"). `QWEN_FALLBACK_SOURCE_LABELS` (dead code stlh
+  fallback dihapus) ikut dihapus.
+- `app.py`/`static/index.html` -- update komentar/label dropdown yg
+  menyebut `qwen2_vl`/"Qwen VLM" jadi `qwen3_vl`/"Qwen3-VL Hosted".
+
+**Bug nyata ditemukan & diperbaiki dari testing SUNGGUHAN (bukan baca
+dokumentasi HF)**: `InferenceClient(provider=None)` (default "auto" routing)
+GAGAL utk `Qwen/Qwen3-VL-2B-Instruct` dgn error `"not supported by any
+provider you have enabled"` -- dicek via `HfApi().model_info(model,
+expand="inferenceProviderMapping")`, model ini TERNYATA cuma di-serve oleh
+SATU provider (`featherless-ai`) saat sesi ini berjalan, dan "auto" tidak
+otomatis menjangkaunya. Fix: `_resolve_live_provider()` (baru, `vlm.py`) --
+kalau panggilan pertama (provider="auto") gagal dgn pesan itu, query Hub API
+utk provider `status="live"` yg sebenarnya, retry SATU KALI dgn provider
+eksplisit itu. Ini BUKAN pelanggaran "no silent OCR/ROI fallback" (task
+eksplisit cuma melarang fallback ke pipeline OCR/ROI) -- masih Qwen, masih
+Hugging Face hosted, dicatat programmatically (`ocr_meta.qwen_hosted_request.
+provider`) & lewat `print()`. Provider bisa dipaksa manual via env
+`HF_PROVIDER` kalau HF berubah lagi ke depannya (jangan hardcode
+`"featherless-ai"` di kode -- itulah kenapa fix-nya lookup dinamis, bukan
+konstanta).
+
+**Verifikasi NYATA (2 dokumen dari `downloaded_documents/`, foto + PDF, TIDAK
+full 25 -- sesuai instruksi eksplisit user "test with 1-3 data, dont use all
+the data"):**
+1. Tanpa `HF_TOKEN`: `extractors.run("qwen3_vl", ...)` melempar
+   `ExtractorError(stage="API_AUTH", "HF_TOKEN environment variable is not
+   set")` SEBELUM panggilan jaringan apa pun -- TIDAK fallback ke `run_v18`.
+2. Dgn `HF_TOKEN` asli, 1 dokumen foto (`13EQ77C6...`): request sukses
+   (elapsed ~9.2s stlh retry provider), respons JSON valid ter-parse,
+   ter-map ke `COMMON_FIELDS` yg SAMA dgn Gemini/Mistral/Qwen2-VL lokal
+   (`source`/`engine` = `"qwen3_vl"` di SEMUA row `raw_results` +
+   `ocr_meta`), nama/nomor rekening/nominal/reward/kedua tanda tangan
+   terbaca `"detected"`/`"present"`. `tenor_penempatan` jatuh ke `"review"`
+   krn model menjawab teks non-numerik ("3 /6 Bulan", bukan salah satu
+   choice 1/3/6 murni) -- `int()` cast di `_adapt_qwen_to_common` gagal,
+   fallback ke `None` -> `review` (PERILAKU YG SUDAH ADA/DIDOKUMENTASIKAN,
+   sama kategorinya dgn keterbatasan tenor di §9b, BUKAN bug baru).
+3. 1 dokumen PDF (`1H_AVgmXHQVoIuGOpfwzm7JeIcI1R2cz_`, lewat cabang
+   `prep.load_document` di `_qwen_prepare_image`, BUKAN cabang foto):
+   sukses juga (elapsed ~7.1s), model menjawab literal teks placeholder
+   cetak formulir yg belum dicoret nasabah utk tenor & reward ("1-3/6 Bulan
+   (*corel salah satu)", "tunai / non-tunai (*corel salah satu)") --
+   kedua-duanya correctly jatuh ke `null`/`not_detected`/`review` lewat
+   validasi yg SUDAH ADA (bukan salah, model genuinely tidak bisa
+   membedakan mana yg dicoret di kualitas render PDF ini -- BUKAN
+   disimpulkan sbg kesimpulan akurasi umum, sample size cuma 1).
+
+**Lanjutan sesi ini -- prompt cleanup + template image (SELESAI, verifikasi
+1 dokumen tambahan, record 6 yg sama):** user minta rapikan
+`DIRECT_SEMANTIC_PROMPT` (bahasa Inggris, hapus rule yg redundan) & kasih
+tahu model layout template asli. Perubahan:
+- `DIRECT_SEMANTIC_PROMPT` ditulis ulang full Inggris + hint layout eksplisit
+  (`signature_nasabah` = kotak KIRI, `signature_bri` = kotak KANAN, diambil
+  presisi dari `preprocessing.SIGNATURE_CONFIG`'s value_bbox x-range, BUKAN
+  tebakan). `extract_direct_semantic()` (versi lokal, sudah 0 caller sejak
+  fix hosted-path sesi sebelumnya) DIHAPUS -- bukan cuma didiamkan lagi.
+  `INDEPENDENT_READ_PROMPT_TEMPLATE`/`FULLPAGE_PROMPT_TEMPLATE`/`_TENOR_RULE`/
+  `_SIGNATURE_RULE` (Indonesia) SENGAJA TIDAK disentuh -- itu punya sistem
+  LAIN yg masih aktif (V10/V12 local VLM fallback dipakai `pipeline.py`,
+  eksplisit di luar scope task ini sejak awal).
+- `vlm._get_template_data_uri()` (baru): render `assets/template.pdf` KOSONG
+  sekali (cache in-memory), dikirim sbg GAMBAR KEDUA (sebelum gambar dokumen
+  terisi) di message hosted -- model diberi tahu eksplisit gambar 1 = blank
+  reference, gambar 2 = yg harus dibaca.
+
+**Hasil re-test record 6 (`1NlvkF3UYsoe7MePHisu85kfUs94eyTsR`, GT tenor "3
+Bulan", `signature_atasan` genuinely kosong per V16):**
+- `tenor_penempatan` TETAP benar (`3`) -- fix prompt sebelumnya robust thd
+  perubahan ini.
+- `signature_bri`/atasan: BENAR sekarang (`false`) -- match GT.
+- `signature_nasabah`: SEKARANG `false` -- padahal GT (V16) bilang SEMUA
+  25 dokumen punya tanda tangan nasabah asli, jadi ini SALAH (sebelumnya,
+  dgn prompt-tanpa-template, nasabah benar `true` tapi atasan salah `true`
+  juga). **Kesimpulan jujur: signature detection BELUM stabil di 3 varian
+  yg dicoba** (selalu true -> swap kiri/kanan -> sekarang selalu false).
+
+**Eksperimen resolusi (DICOBA & DIBUANG, jangan diulang tanpa alasan baru):**
+`vlm.HOSTED_MAX_SIDE_FULL` (konstanta baru, terpisah dari `MAX_SIDE_FULL`
+lokal supaya TIDAK menyentuh V10/V12 fallback) dinaikkan 1600 -> 2600 utk
+jalur hosted saja (aman dicoba krn tidak lagi dibatasi CPU/RAM lokal, cuma
+biaya/latency HTTP). Hasil re-test record 6 yg SAMA (temperature=0):
+signature JUSTRU flip lagi (`nasabah=false` tetap salah, `bri=true` balik
+salah lagi) DAN muncul regresi baru -- `nominal_penempatan` misread jadi
+"Rp. 500.000" (10x lebih kecil dari 2 run sebelumnya yg konsisten ~5 juta).
+**Kesimpulan: resolusi BUKAN akar masalahnya** -- pola flip-flop di
+temperature=0 pada 4 varian berbeda (prompt lama, prompt+template, +res
+tinggi) lebih konsisten dgn hosted serving stack yg genuinely tidak
+deterministik/reliable utk penilaian visual sekecil ini, BUKAN sesuatu yg
+bisa diperbaiki dgn menaikkan resolusi gambar semata. `HOSTED_MAX_SIDE_FULL`
+DIKEMBALIKAN ke 1600 (default sama dgn `MAX_SIDE_FULL`) sesuai instruksi
+eksplisit user setelah melihat hasil ini -- konstanta & env var
+(`HF_MAX_SIDE_FULL`) TETAP ada terpisah kalau eksperimen resolusi mau
+dicoba lagi nanti dgn alasan/data baru, tapi jangan diulang tanpa itu.
+
+**Root cause SEBENARNYA (dikonfirmasi user, BUKAN tebakan lagi):** user
+mencoba manual di HF Space demo Qwen3-VL yg SAMA (bukan model/provider yg
+lebih besar/beda) tapi dgn gambar YANG SUDAH DI-CROP ke area relevan (bukan
+halaman penuh) -- dan hasilnya BENAR. Ini mengonfirmasi: masalahnya BUKAN
+resolusi halaman penuh (makanya eksperimen `HOSTED_MAX_SIDE_FULL=2600` di
+atas tidak membantu), BUKAN model/provider quality -- tapi TASK FRAMING:
+menyuruh model MENCARI DULU baru MENILAI tanda tangan kecil di tengah
+halaman penuh jauh lebih sulit drpd menilai area yg SUDAH di-zoom ke tempat
+itu. Field teks (nama/rekening/nominal/reward) tidak kena masalah ini krn
+tidak butuh menemukan lokasi presisi dulu -- itu kenapa field2 itu konsisten
+benar sementara tenor (sebelum fix prompt) & signature (sampai sekarang)
+konsisten bermasalah -- keduanya butuh menemukan tanda/lokasi presisi kecil.
+
+**Keputusan eksplisit user (mulanya):** 2 opsi fix ditawarkan -- (1) tambah
+crop kecil khusus area tanda tangan, atau (2) model self-locate dulu baru
+re-query pd crop itu. User AWALNYA memilih TETAP full-page-only, terima
+signature detection tidak reliable. **User kemudian minta lanjut ("push
+further")** -- lihat sub-bagian di bawah, SUDAH ADA fix yg bekerja tanpa
+melanggar batasan full-page/no-ROI (tidak jadi perlu opsi 1/2 di atas).
+
+**Grounded prompt rewrite (SELESAI, sebelum majority-vote di bawah):**
+`DIRECT_SEMANTIC_PROMPT` ditulis ulang lagi, kali ini digroundkan ke bukti
+visual NYATA (bukan tebakan) dgn me-render `assets/template.pdf` DAN
+dokumen asli record 6 lalu di-zoom manual (`prep.load_document` + crop
+manual, dilihat langsung sbg gambar). Temuan konkret:
+1. Konvensi tenor/reward BUKAN "coret/circle" generik -- printed text PERSIS
+   `"1 / 3 / 6 Bulan (*coret salah satu)"`, dan customer men-CORET (garis
+   strike-through) angka yg TIDAK dipilih (dikonfirmasi visual: record 6
+   angka "6" ada garis coret, "3" bersih -> jawaban benar "3"). Prompt lama
+   cuma bilang "marked/circled/crossed out" (3 kemungkinan berbeda) -- SEKARANG
+   spesifik: "look for a strike-through line ON TOP of the digit(s) NOT
+   chosen, report the ONE digit with NO line through it".
+2. Kotak `signature_nasabah` (kiri) TERNYATA berisi GRAFIK CETAK ("Opsional
+   (Tidak Wajib) materai Rp10.000" dlm kotak bulat abu-abu) yg BUKAN tanda
+   tangan -- tanda tangan asli biasanya goresan kursif KECIL yg overlap dgn
+   stempel meterai fisik di kotak yg SAMA (dikonfirmasi visual record 6:
+   goresan biru tipis di atas stempel Rp10.000). Prompt SEKARANG eksplisit
+   suruh abaikan grafik cetak itu & cari goresan tulisan tangan asli.
+   Kotak `signature_bri` (kanan) dikonfirmasi POLOS (cuma garis titik-titik
+   cetak, tanpa grafik lain) -- prompt bilang ini eksplisit jg (box lbh
+   sederhana drpd nasabah, BUKAN alasan knp keduanya sama sulitnya).
+
+**Majority-vote utk signature (SELESAI, TERBUKTI BEKERJA -- fix nyata,
+bukan sekadar dokumentasi limitasi lagi):** root cause instabilitas
+(5 percobaan sebelumnya di record 6 yg SAMA, temperature=0, hasil signature
+berubah-ubah tiap kali walau prompt makin presisi) didiagnosis BUKAN soal
+kata-kata prompt lagi tapi genuinely non-determinisme di serving stack
+hosted utk 2 field spesifik ini. Fix: `vlm.extract_direct_semantic_hosted_
+majority()` (baru) -- panggil `extract_direct_semantic_hosted()` SEBANYAK
+`HOSTED_SIGNATURE_VOTE_COUNT` kali (default 3, env `HF_SIGNATURE_VOTE_COUNT`,
+ganjil spy tdk pernah seri), ambil MAJORITY VOTE HANYA utk
+`signature_nasabah`/`signature_bri` (field teks/angka lain diambil dari run
+PERTAMA saja -- voting exact-match utk teks tidak masuk akal krn variasi
+format harmless spt "5000000" vs "Rp 5.000.000" akan merusak vote).
+`extractors.run_qwen3_vl_hosted` dipindah ke fungsi ini (bukan versi single-
+call lagi). Detail tiap vote (list bool per field) disimpan di
+`ocr_meta.qwen_hosted_request.signature_votes` utk transparansi, +di-print
+ke stdout per vote.
+
+**Hasil verifikasi (2 dokumen, biaya 3x panggilan/API per dokumen skrg,
+~21-26 detik total drpd ~7-9 detik sblmnya -- trade-off yg jelas dinaikkan
+sengaja):**
+- Record 6 (`1NlvkF3UYsoe7MePHisu85kfUs94eyTsR`, GT signature_atasan KOSONG,
+  signature_nasabah ADA): votes nasabah=`[False,True,True]`->majority
+  **True** (BENAR), votes bri=`[False,False,False]`->**False** (BENAR).
+  **PERTAMA KALI kedua field benar SEKALIGUS** dari 6 percobaan di dokumen
+  yg sama.
+- Dokumen ke-2 (`13EQ77C6tOZoWZ-vN4HEmn6BO7qsB0hNB`, foto, GT signature tidak
+  diverifikasi eksplisit tapi hasil konsisten/masuk akal): votes
+  nasabah=`[True,True,True]` (unanimous), votes bri=`[True,False,False]`
+  ->majority **False** -- menunjukkan mekanisme voting genuinely resolve
+  disagreement per-kotak, bukan cuma kebetulan.
+
+**Catatan jujur**: baru diverifikasi di 2 dokumen (bukan benchmark formal),
+tapi ini PERTAMA KALI ada pendekatan yg benar2 mengatasi akar masalah
+(non-determinisme) drpd cuma memoles kata-kata prompt. Biaya 3x lipat
+latency/token per dokumen utk engine `qwen3_vl` -- worth it utk tahap test
+ini, tapi kalau nanti masuk produksi sungguhan perlu dipikir ulang trade-off
+biaya vs akurasi (mis. turunkan `HF_SIGNATURE_VOTE_COUNT` kalau biaya jadi
+masalah, atau majority-vote SEMUA field bukan cuma signature kalau field
+lain jg mulai kelihatan tidak stabil di sampel lebih besar).
+
+**TIDAK disentuh (scope eksplisit sesuai instruksi task):**
+`pipeline.py`/`preprocessing.py`/`postprocessing.py`/`comparison.py` (nol
+baris), `evaluation.py` (generic, otomatis dukung `"qwen3_vl"` dari
+`extractors.ENGINES` tanpa perlu diubah, SAMA spt §9b), V10/V12 VLM fallback
+lokal di `vlm.py` (`_load`/`_infer`/`extract_fields_independent`/
+`extract_fields_fullpage`, dipakai `pipeline._run_vlm_fallback`, TIDAK
+terkait sama sekali dgn engine `qwen3_vl`).
+
+**Belum dikerjakan (di luar scope sesi ini, eksplisit dilarang task)**:
+benchmark akurasi formal `evaluation.py --engine qwen3_vl` 25-dokumen,
+local Qwen deployment/quantization, multi-model selection UI.
+
+## 9d. V19d — Tenor date-range + reward non-tunai detail (SELESAI SEBAGIAN,
+kemenangan nyata + 1 keterbatasan baru terkonfirmasi & didokumentasikan)
+
+User (lihat `vlm.py` langsung) minta 2 field yg dulu SELALU null utk
+`qwen3_vl` diisi sungguhan: rentang tanggal tenor (`tanggal_mulai`/
+`tanggal_selesai`) & detail barang `reward_non_tunai` (dulu cuma mirror
+string "non_tunai", bukan isi barang sungguhan).
+
+**Fix 1 -- tanggal_mulai/tanggal_selesai (BERHASIL, terverifikasi dgn
+contoh nyata).** Ditambahkan ke `DIRECT_SEMANTIC_FIELDS`/`DIRECT_SEMANTIC_
+PROMPT` (`vlm.py`), `extractors._adapt_qwen_to_common` diisi sungguhan
+(dulu hardcode null) -- machinery derive `rentang_tenor`/`comparison.
+validate_tenor` SUDAH ADA & TERBUKTI (dipakai Gemini/Mistral sejak §9),
+TIDAK perlu diubah. **Ground truth dataset (`ocr_evaluation.xlsx`) record 6
+blank-nya KOSONG** (dicek visual) jadi tidak bisa jadi bukti positif --
+tapi record LAIN (`1a7X78Si8DTJCpf6Czq33IdnokoXoFRuA`, ditemukan via spot-
+check 3 dokumen) TERNYATA terisi ("14 Agustus 2026 s/d 14 Februari 2027")
+& model membaca KEDUANYA benar, PLUS otomatis konsisten scr kalender dgn
+`tenor_penempatan=6` yg dibaca independen (6 bulan kalender persis) --
+**bukti nyata pertama fitur ini bekerja end-to-end**, bukan cuma tidak
+crash.
+
+**Fix 2 -- reward_non_tunai_detail (DIPINDAH jadi follow-up call
+KONDISIONAL, bukan bagian prompt utama -- root cause bug asli
+ditemukan & diperbaiki via testing nyata, bukan tebakan).**
+1. Percobaan PERTAMA: field ditambahkan LANGSUNG ke `DIRECT_SEMANTIC_
+   PROMPT` utama (sama call dgn `bentuk_reward`), dgn instruksi eksplisit
+   "abaikan teks contoh cetak 'iPhone 17 Pro Max...'". **GAGAL TOTAL** --
+   diuji di record `1a7X78Si8DTJCpf6Czq33IdnokoXoFRuA` (GT: `tunai`,
+   "tunai" DILINGKARI tanpa coretan sama sekali di baris itu): model
+   menjawab `bentuk_reward="non_tunai"` (SALAH) DAN meng-copy PERSIS teks
+   contoh cetak "iPhone 17 Pro Max 128 GB Warna Silver" sbg jawaban --
+   diulang 2x (termasuk stlh instruksi anti-copy diperkuat lebih eksplisit
+   lagi), TETAP gagal kedua-duanya.
+2. **Diagnosis via eliminasi (dibuktikan, bukan tebakan)**: field
+   `reward_non_tunai_detail` DIHAPUS TOTAL dari prompt utama (extractors
+   tidak lagi menyebutnya sama sekali) & di-test ulang di dokumen yg SAMA
+   -- `bentuk_reward` **TETAP** `"non_tunai"` (salah) di SEMUA 3 vote,
+   1x elapsed. Ini MEMBUKTIKAN hipotesis "priming dari pertanyaan detail"
+   SALAH -- model genuinely tidak bisa membaca lingkaran "tunai" itu scr
+   independen, terlepas dari field lain apa yg ditanyakan. Kesimpulan:
+   ini masalah PERSEPSI VISUAL (kualitas/resolusi gambar penuh 1600px
+   menghilangkan detail lingkaran tipis), SATU KATEGORI dgn keterbatasan
+   signature yg SUDAH diterima sesi sebelumnya (§9c) -- BUKAN sesuatu yg
+   bisa diperbaiki dgn kata-kata prompt lagi.
+3. **Percobaan generalisasi konvensi tanda (DICOBA & DIBUANG -- regresi
+   nyata, jangan diulang tanpa data baru)**: rule tenor/reward diperluas
+   utk terima KEDUA konvensi (coret salah satu ATAU lingkari yg benar).
+   Hasil: TIDAK memperbaiki dokumen target (`bentuk_reward` tetap salah)
+   DAN merusak record 6 yg SEBELUMNYA selalu benar (`bentuk_reward` jadi
+   `null`/`"non tunai"` dgn spasi bukan underscore, gagal exact-match).
+   **DIKEMBALIKAN ke wording strike-through-only yg terbukti reliable**
+   di SEMUA dokumen lain yg pernah diuji sesi ini -- trade-off yg diterima
+   SADAR: model tidak bisa baca konvensi lingkaran-saja utk reward, tapi
+   itu lebih baik drpd merusak kasus yg sudah benar demi 1 dokumen edge
+   case yg TETAP tidak sepenuhnya ke-fix bahkan dgn rule yg lebih rumit.
+4. **Solusi akhir utk reward_non_tunai_detail (BEKERJA, arsitektur
+   final)**: `vlm.REWARD_DETAIL_PROMPT` + `_extract_reward_detail_hosted()`
+   (baru) -- follow-up call TERPISAH, hanya dipanggil (dari
+   `extract_direct_semantic_hosted_majority`) KALAU `bentuk_reward` hasil
+   call utama SUDAH `"non_tunai"` -- TIDAK PERNAH membebani/mem-bias call
+   utama lagi. Karena ground truth dataset ini 100% `tunai`/Cashback,
+   follow-up ini PRAKTIS TIDAK PERNAH terpicu di 25 dokumen yg ada --
+   biaya tambahan nyaris nol utk kasus umum. Ada guard tambahan
+   (`_REWARD_DETAIL_PRINTED_EXAMPLE`) yg buang jawaban kalau PERSIS sama
+   dgn teks contoh cetak, sbg lapis pertahanan terakhir.
+
+**Ringkasan jujur**: Fix 1 (tanggal tenor) = kemenangan bersih, terverifikasi
+nyata. Fix 2 (reward detail) = arsitektur sudah benar & aman (tidak pernah
+dipanggil kalau tidak perlu, tidak lagi bias call utama), TAPI akar masalah
+`bentuk_reward` salah baca lingkaran pada 1 dokumen spesifik TETAP belum
+terpecahkan -- didokumentasikan sbg keterbatasan, BUKAN diklaim selesai.
+**Jangan coba lagi generalisasi rule coret/lingkar tanpa dataset uji lebih
+besar** (1 dokumen positif tidak cukup dasar utk ubah rule yg dipakai
+SEMUA dokumen lain) -- kalau mau coba lagi, uji DULU thd minimal 5-10
+dokumen sebelum mengganti wording yg sudah terbukti, PERSIS prinsip §15
+("satu perubahan kecil, satu pengukuran, baru lanjut") yg session ini
+sempat langgar (2 perubahan besar diuji sekaligus tanpa baseline
+per-dokumen dulu) sebelum akhirnya kembali ke disiplin itu.
+
+## 9e. V19e — Local Qwen3-VL-2B on GPU (MX230 2GB) + "qwen3_vl_local" engine
+(SELESAI, hasil JUJUR: TIDAK USABLE di hardware ini, tapi engine tetap
+ditambahkan sbg opsi terpisah atas permintaan eksplisit user)
+
+User minta download Qwen3-VL agar bisa dipakai LOKAL di GPU sendiri
+(NVIDIA MX230). Dikerjakan penuh (bukan cuma rencana): environment
+disiapkan, model didownload, dimuat di GPU, dites end-to-end thd 9 dokumen
+nyata dgn ground truth -- SEMUA langkah diverifikasi via eksekusi nyata,
+bukan tebakan.
+
+**Setup environment (real, terverifikasi):**
+- `nvidia-smi` konfirmasi GPU fisik ADA: NVIDIA GeForce MX230, driver
+  536.67, **CUDA Version: 12.2 (maksimum yg didukung driver ini)**, VRAM
+  **2048 MiB (2GB)**, mode WDDM (shared dgn desktop).
+- Torch terpasang sblmnya `2.14.0+cpu` (CPU-only, `torch.cuda.is_available()
+  == False`) -- diganti CUDA build. **Penting utk sesi depan**: cu124/cu126/
+  cu128/cu130 SEMUA tersedia di index pytorch tapi TIDAK kompatibel dgn
+  driver 536.67 (CUDA runtime > 12.2 yg didukung driver) -- yg BENAR2
+  kompatibel & tersedia HANYA `cu118` (`torch==2.7.1+cu118`, versi lebih
+  baru tdk ada di index cu118/cu121 utk cu121). `torchvision` HARUS
+  di-reinstall match persis (`0.22.1+cu118` utk torch `2.7.1`) -- pip TIDAK
+  otomatis downgrade dependency yg sudah kepasang, dibiarkan mismatch bakal
+  crash saat import.
+- `transformers` 5.17.0 yg SUDAH terpasang **ternyata SUDAH punya native
+  class** `Qwen3VLForConditionalGeneration`/`Qwen3VLMoeForConditionalGeneration`
+  -- TIDAK perlu upgrade transformers sama sekali utk Qwen3-VL.
+  `AutoConfig.from_pretrained(...).model_type` utk `Qwen/Qwen3-VL-2B-Instruct`
+  = `"qwen3_vl"` (dikonfirmasi via `hf_hub_download` config.json saja, tanpa
+  download model penuh dulu).
+- `bitsandbytes==0.50.2` terpasang bersih via pip di Windows (isu lama
+  "bitsandbytes Windows kurang reliable" TIDAK terjadi di versi ini).
+- Model `Qwen/Qwen3-VL-2B-Instruct` (fp16 asli, BUKAN GGUF -- lihat catatan
+  desain di bawah) didownload via `huggingface_hub.snapshot_download` ke
+  `models/Qwen3-VL-2B-Instruct/` (~4GB, ~26 menit), sudah otomatis
+  ter-gitignore (`models/` + `*.safetensors` sudah ada di `.gitignore`
+  sblm sesi ini).
+
+**Keputusan desain (dgn user, PENTING utk sesi depan):** user awalnya
+jawab 2 pertanyaan terpisah dgn jawaban yg SECARA TEKNIS tidak bisa
+digabung -- "2B GGUF quantized" (format llama.cpp) TAPI "integrasikan ke
+vlm.py via transformers+bitsandbytes" (format berbeda total, transformers
+TIDAK bisa load GGUF multimodal dgn cara standar). Diselesaikan dgn
+memprioritaskan pilihan RUNTIME (lebih spesifik/actionable): download
+repo safetensors NORMAL (bukan GGUF), kuantisasi 4-bit dilakukan SAAT
+LOAD via `bitsandbytes` (`BitsAndBytesConfig`), BUKAN pre-kuantisasi GGUF
+di disk. Ini flagged eksplisit ke user saat itu, tidak dikoreksi -- jadi
+dianggap konfirmasi implisit.
+
+**Perubahan kode (`vlm.py`):**
+- `DEFAULT_LOCAL_CANDIDATES` tambah `models/Qwen3-VL-2B-Instruct` (dicek
+  LEBIH DULU drpd Qwen2-VL lama).
+- `LOAD_IN_4BIT_ENV` (baru, `VLM_LOAD_IN_4BIT`, default `"auto"`) -- 4-bit
+  otomatis AKTIF kalau device CUDA, TIDAK aktif di CPU (V10/V12 fallback
+  CPU-only TIDAK terpengaruh sama sekali).
+- `_load()`: tambah branch eksplisit `model_type == "qwen3_vl"` ->
+  `Qwen3VLForConditionalGeneration`, `"qwen3_vl_moe"` ->
+  `Qwen3VLMoeForConditionalGeneration` (pola SAMA persis dgn branch
+  qwen2_vl/qwen2_5_vl yg sudah ada, bukan rewrite). Load 4-bit pakai
+  `device_map={"": 0}` (BUKAN `.to(device)` manual sesudahnya -- restriksi
+  transformers utk model quantized).
+- `extract_direct_semantic_local()` (baru) -- reuse PERSIS
+  `DIRECT_SEMANTIC_PROMPT`/`_parse_direct_semantic_json`/`_infer()` yg SAMA
+  dgn jalur hosted, kirim 2 gambar (template + dokumen) yg SAMA lewat
+  `_infer()` yg SUDAH mendukung multi-image. `_get_template_data_uri()`
+  di-refactor jadi reuse `_get_template_image()` (baru, cache gambar
+  mentah) supaya tidak duplikasi `prep.load_document(prep.TEMPLATE_PATH)`.
+
+**Perubahan kode (`extractors.py`):** engine baru `"qwen3_vl_local"` (label
+"Qwen3-VL-2B (Local GPU, EXPERIMENTAL)") ditambahkan **DI SAMPING**
+`"qwen3_vl"` (hosted) -- TIDAK menggantikan, TIDAK mengubah default,
+sesuai keputusan eksplisit user setelah ditanya (lihat hasil eval di bawah
+knp menggantikan hosted SALAH). `run_qwen3_vl_local()`: prep gambar SAMA
+(`_qwen_prepare_image`), TIDAK ADA majority-vote (beda dgn hosted -- 1x
+inferensi lokal sudah >5 menit, 3x tidak masuk akal), TIDAK fallback ke
+`run_v18` kalau gagal (SAMA persis kebijakan hosted). `static/index.html`
+kedua dropdown (Tab 1 & 2) tambah opsi ini.
+
+**HASIL EVALUASI JUJUR (9 dokumen nyata dgn ground truth, `eval_runs/
+local_qwen_eval_results.csv`, script `local_qwen_eval.py` di root --
+STANDALONE, TIDAK dipanggil `evaluation.py`/`extractors.py`):**
+
+Resolusi `VLM_MAX_SIDE_FULL=1600` (default) -> **CUDA OOM** (butuh puncak
+3.88GB drpd 2GB tersedia) -- weight model SENDIRI cuma 1.58GB (4-bit
+BERHASIL muat), tapi vision encoder + activation utk halaman penuh
+resolusi tinggi yg menghabiskan sisa VRAM. Diturunkan ke `640` supaya
+tidak OOM (puncak 1.86GB, muat) -- TAPI hasil ekstraksi PRAKTIS 0% akurat:
+
+| Field | Akurasi (9 dokumen) | Catatan |
+|---|---|---|
+| nama_nasabah | 0/9 | Mulai dari label generik ("Nasabah") sampai nama Indonesia yg TERDENGAR masuk akal tapi SEPENUHNYA karangan |
+| nomor_rekening | 0/9 | **7 dari 9 jawaban PERSIS string "1234567890"/"123456789"** -- BUKAN salah baca, ini fallback halusinasi TETAP |
+| nominal_penempatan | 1/9 | Sisanya meleset 10x-1000x |
+| tenor | "5/9 benar" DI ATAS KERTAS, TAPI model jawab "3 bulan" di 7 dari 9 dokumen TANPA PEDULI isi gambar -- kebetulan 5 dari 9 GT memang "3 Bulan" (base rate), BUKAN genuinely membaca. 2 kasus GT="6 Bulan" SELALU salah. |
+| bentuk_reward | ~0/9 | Jawaban tak masuk akal ("100%", "1x", "10000000") |
+| signature (2 field) | N/A (GT tdk di-load script ini) | Jawaban IDENTIK ("ada"/"kosong") di SEMUA 9 dokumen tanpa variasi -- pola constant-output yg sama dgn tenor |
+
+Proses full-25-dokumen SEMPAT dicoba tapi **di-kill sistem krn low
+memory** setelah 12 dokumen (9 sukses + 3 gagal `imread` -- bug SENDIRI di
+script test, `cv2.imread` tdk bisa baca PDF, PERBAIKAN sudah dimasukkan ke
+`local_qwen_eval.py` tapi TIDAK di-rerun). 9 dokumen dinilai CUKUP -- pola
+sudah 100% konsisten & konklusif, melanjutkan 13 dokumen sisanya (~1.5 jam
+lagi) tidak akan mengubah kesimpulan.
+
+**Kesimpulan JUJUR, JANGAN diulang tanpa data baru**: pada GPU 2GB spt
+MX230, TIDAK ADA resolusi yg SEKALIGUS (a) cukup kecil utk muat di VRAM
+DAN (b) cukup besar utk model benar2 membaca tulisan tangan dokumen ini.
+Weight 4-bit muat (1.58GB), tapi begitu resolusi diturunkan cukup jauh
+utk sisa VRAM cukup utk vision encoder, modelnya sendiri sudah TIDAK BISA
+membaca apa pun lagi -- ini BUKAN masalah prompt/kuantisasi yg bisa
+diperbaiki lebih lanjut, ini keterbatasan HARDWARE murni. Engine
+`qwen3_vl_local` TETAP ada di kode (opsi eksplisit, EXPERIMENTAL) utk GPU
+dgn VRAM lebih besar atau evaluasi ulang nanti -- **JANGAN dijadikan
+default/pengganti `qwen3_vl` hosted**, TIDAK USABLE di hardware sesi ini.
+
+**File baru:** `local_qwen_eval.py` (root, standalone), `eval_runs/
+local_qwen_eval_results.csv` (9 baris hasil, bukti mentah).
+**TIDAK disentuh:** `qwen3_vl` (hosted, tetap default/utama), `pipeline.py`/
+`preprocessing.py`/`postprocessing.py`/`comparison.py`, V10/V12 local VLM
+fallback (`extract_fields_independent`/`extract_fields_fullpage`, masih
+CPU-only spt sblmnya krn `LOAD_IN_4BIT_ENV` auto-off di CPU).
+
+## 10. Prioritas Berikutnya (berdasar data V15.2/V17/V18 di atas, BUKAN tebakan)
 
 1. **Section B recovery, SEBAGIAN sudah selesai lewat V16 (§6)** — record
    7/24 (`nama_nasabah`, kontaminasi JUDUL) SUDAH fix lewat token-level
@@ -949,7 +1779,7 @@ File bukti (semua di `eval_runs/`): `evaluation_summary_v18_final.json`/
    (25 dokumen) bersamaan (sudah beberapa kali trigger OOM/MemoryError sesi
    lalu). Jalankan satu-satu, atau pakai `--limit` utk uji cepat dulu. **V17:
    kondisi bisa LEBIH PARAH drpd ini** (free RAM sistem sempat <1GB krn app
-   lain milik user, di luar kendali evaluator) — lihat §11 utk workaround
+   lain milik user, di luar kendali evaluator) — lihat §12 utk workaround
    batch-subprocess kalau kejadian lagi.
 8. **(V17, RESOLVED lewat V18 §8 Fix 3) Record 9 `nama_nasabah` dulu
    ter-ekstrak PENUH tapi ISINYA SALAH** (baca digit dari row lain) — SEKARANG
@@ -1005,7 +1835,7 @@ File bukti (semua di `eval_runs/`): `evaluation_summary_v18_final.json`/
     (lihat §8 catatan CUDNN di atas). TIDAK perlu dikejar kecuali muncul
     pola serupa yg lebih luas.
 
-## 10. Sudah Dicoba / Jangan Diulang (hemat waktu+token sesi berikutnya)
+## 11. Sudah Dicoba / Jangan Diulang (hemat waktu+token sesi berikutnya)
 
 - Canny edge (`Canny(50,150)` tetap atau adaptif) utk deteksi boundary kertas → SUDAH
   dikonfirmasi gagal total di dataset ini (visual + rasio area), JANGAN kembalikan jadi
@@ -1102,7 +1932,7 @@ File bukti (semua di `eval_runs/`): `evaluation_summary_v18_final.json`/
 - **(V17) Menjalankan `evaluation.py` (bahkan `--limit 5`) di mesin ini saat
   free RAM sistem <1GB (dipakai app lain user)** → OOM-killed BERULANG kali,
   bahkan sendirian (tanpa proses evaluator lain jalan bersamaan) → lihat
-  §11 utk workaround batch-subprocess yg terbukti bekerja di kondisi sama.
+  §12 utk workaround batch-subprocess yg terbukti bekerja di kondisi sama.
 - **(V18) Mempercayai laporan visual-only dari sub-agent TANPA cross-check
   data keras** → sesi ini mendesain rencana Fix 3 awal berdasar laporan 2
   Explore agent yg mengaudit visual 25 `*_roi_document.jpg` (deskripsi
@@ -1135,7 +1965,7 @@ File bukti (semua di `eval_runs/`): `evaluation_summary_v18_final.json`/
   kode yg BENAR2 memproduksi value yg salah bisa beda dari yg diasumsikan,
   bahkan kalau gejala akhirnya (value tampak "collapsed"/salah) sama persis.
 
-## 11. Cara Re-run Evaluasi (perintah persis)
+## 12. Cara Re-run Evaluasi (perintah persis)
 
 **(V18) Semua output (`evaluation_results_*.csv`/`evaluation_summary_*.json`/
 `stage_evaluation_*`/`compare_runs_*`/`signature_diagnostics.csv`) SEKARANG
@@ -1144,7 +1974,7 @@ BUKAN root project lagi** — sebelumnya berserakan campur dgn file kode,
 menyulitkan cari file evaluasi/diagnostic terbaru. `eval_runs/` di-gitignore
 (sama spt `evaluation_summary*`/`evaluation_result*` sebelumnya) — file di
 situ HANYA utk referensi lokal, TIDAK di-commit. Semua file historis (V13-V18)
-SUDAH dipindah ke sana sesi ini, lihat §12.
+SUDAH dipindah ke sana sesi ini, lihat §13.
 
 ```bash
 # end-to-end (field accuracy + decision accuracy) -- paling relevan utk "akurasi asli"
@@ -1171,7 +2001,7 @@ V16 sempat lupa pakai flag ini & harus dibersihkan manual (`rm -rf
 evaluation_debug`) sesudahnya. Selalu sertakan `--debug-dir none` kecuali
 memang butuh crop debug visual utk investigasi.
 
-**V17 — mesin bisa lebih parah dari ~8GB yg didokumentasikan §9 poin 7.**
+**V17 — mesin bisa lebih parah dari ~8GB yg didokumentasikan §10 poin 7.**
 Sesi V17 mengalami `evaluation.py` full-25-dokumen (bahkan `--limit 5`)
 di-OOM-kill BERULANG KALI oleh sistem (free RAM sempat turun ke <1GB krn
 aplikasi lain user, di luar kendali proses evaluator) — bukan disebabkan
@@ -1186,7 +2016,7 @@ gabung hasil tiap batch di akhir. Kalau `evaluation.py` biasa (bahkan
 `--limit` kecil) di-OOM-kill lagi di sesi depan, pakai pola ini drpd
 mengulang retry penuh berkali-kali.
 
-## 12. Peta File
+## 13. Peta File
 
 **Aktif (produksi, di-import `app.py`/`pipeline.py`):** `preprocessing.py`, `ocr.py`,
 `postprocessing.py`, `dynamic_extraction.py`, `comparison.py`, `vlm.py`, `pipeline.py`,
@@ -1211,7 +2041,7 @@ sebelum dihapus — mungkin masih dipakai manual utk banding V10/11 vs V12 lewat
 `postprocessing1.py`, `vlm1.py`, `index1.html`, `static/index1.html`,
 `static/serep2.html`/`serep3.html`/`serep4.html`/`serep6.html`.
 
-## 13. Field & Rules (tidak berubah dari versi sebelumnya)
+## 14. Field & Rules (tidak berubah dari versi sebelumnya)
 
 Field: Nama (fuzzy match 80%), Nomor Rekening, Unit Kerja, Nominal Penempatan, Tenor
 (dari rentang tanggal, <1 bulan = tidak sesuai), Bentuk Reward (tunai/non-tunai +
@@ -1224,11 +2054,11 @@ Environment: Windows, FastAPI `127.0.0.1:8001`, GPU NVIDIA MX230 2GB (PaddleOCR
 mayoritas jalan CPU di environment evaluasi), `MAX_CANVAS_HEIGHT_GPU=2200` /
 `_CPU=6000`, `text_recognition_batch_size=1` (low VRAM GPU kecil).
 
-## 14. Instruksi utk Claude (sesi berikutnya)
+## 15. Instruksi utk Claude (sesi berikutnya)
 
 1. Baca §1-9 dulu — itu cukup utk lanjut kerja tanpa re-explore dari nol.
-2. Jangan ulangi §10 (sudah dicoba & terbukti gagal/terbukti benar).
-3. Sebelum ubah kode: jalankan evaluator (§11), baca angkanya, baru putuskan.
+2. Jangan ulangi §11 (sudah dicoba & terbukti gagal/terbukti benar).
+3. Sebelum ubah kode: jalankan evaluator (§12), baca angkanya, baru putuskan.
 4. **Default: satu perubahan kecil per sesi, langsung diverifikasi full
    25-dokumen** (bukan sapuan banyak fix sekaligus). V15 & V17 adalah
    PENGECUALIAN krn user eksplisit minta beberapa hal sekaligus dlm satu
@@ -1246,7 +2076,7 @@ mayoritas jalan CPU di environment evaluasi), `MAX_CANVAS_HEIGHT_GPU=2200` /
 5. Setelah ubah kode: update §2/§3/§4/§5/§6/§7/§8 (state tiap versi) di file
    ini dgn angka baru — bukan cuma cerita naratif, supaya sesi berikutnya
    bisa langsung baca tabel.
-6. Jangan jalankan 2 evaluator penuh (25 dokumen) bersamaan (§9 poin 7,
+6. Jangan jalankan 2 evaluator penuh (25 dokumen) bersamaan (§10 poin 7,
    resource mesin cuma ~8GB RAM, sudah beberapa kali OOM/MemoryError). **V17:
    bisa OOM bahkan SATU evaluator/`--limit` kecil kalau RAM sistem lagi
-   dipakai app lain user** — lihat §11 utk workaround batch-subprocess.
+   dipakai app lain user** — lihat §12 utk workaround batch-subprocess.

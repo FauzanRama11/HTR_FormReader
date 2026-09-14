@@ -2,7 +2,7 @@
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
 python-multipart==0.0.32
-pydantic==2.13.4
+pydantic==2.13.5
 
 # Image / PDF / data I/O (preprocessing.py, data_input.py, evaluation*.py)
 opencv-python-headless==5.0.0.93
@@ -22,19 +22,70 @@ gdown==6.1.0
 paddleocr==3.7.0
 paddlepaddle==3.2.0
 
-# VLM fallback (vlm.py, Qwen2-VL-2B-Instruct) -- OPTIONAL: pipeline.py's
-# VLM_FALLBACK_ENABLED works without these installed (vlm._load() raises a
-# clear RuntimeError telling you to install requirements.txt, and pipeline.py's
-# fallback call sites already handle that failure), but decisive-field fallback
-# accuracy depends on the VLM actually being available. Install these to
-# enable it. GPU (CUDA) build of torch is recommended for usable latency; the
-# default PyPI wheel below is CPU-only on most platforms -- see
+# VLM (vlm.py, Qwen2-VL-2B-Instruct) -- OPTIONAL: pipeline.py's
+# VLM_FALLBACK_ENABLED (V18 fallback) AND extractors.run_qwen_vlm (V19 --
+# "qwen3_vl_local" engine, extractors.run_qwen3_vl_local) both work without
+# these installed (vlm._load() raises a clear RuntimeError telling you to
+# install requirements.txt; both call sites already let that propagate as a
+# real error, no silent fallback), but extraction accuracy for either path
+# depends on the VLM actually being available. Install these to enable it.
+# GPU (CUDA) build of torch is recommended for usable latency; the default
+# PyPI wheel below is CPU-only on most platforms -- see
 # https://pytorch.org/get-started/locally/ for a CUDA-matched install command.
 torch>=2.4
 transformers>=4.49
 accelerate>=0.34
 pillow==12.3.0
 
+# Local Qwen3-VL on a VRAM-constrained GPU (e.g. a 2GB MX230) -- 4-bit
+# quantized loading via bitsandbytes (vlm.py's _load(), LOAD_IN_4BIT_ENV,
+# default "auto" = on whenever CUDA is selected). NOT pinned to a specific
+# CUDA build here since that's machine/driver-specific (confirmed this
+# session: an MX230 with driver reporting "CUDA Version: 12.2" needed the
+# cu118 wheel specifically -- newer cu124+/cu126+ torch builds silently
+# require a newer driver and torch.cuda.is_available() stays False with no
+# clear error) -- install torch's CUDA build matching YOUR nvidia-smi
+# "CUDA Version" yourself, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu118
+# (match torchvision to the SAME torch version afterward, e.g. 0.22.1 for
+# torch 2.7.1 -- pip will otherwise leave a stale torchvision requiring the
+# old torch version).
+bitsandbytes>=0.43
+# Measured, honest result of this specific setup (2GB VRAM, see handover.md):
+# accuracy was ~0% on name/account number across a real 9-document run --
+# the resolution low enough to avoid CUDA OOM (VLM_MAX_SIDE_FULL=640) is too
+# low for the model to actually read handwriting. Provided for machines
+# with more VRAM or future re-evaluation, not a working substitute for the
+# hosted "qwen3_vl" engine on hardware this constrained.
+# V19 -- required at runtime by transformers' AutoProcessor.from_pretrained
+# for the Qwen2-VL family (pulls in Qwen2VLVideoProcessor during auto-
+# resolution even for pure image usage, no video involved) on transformers
+# >=5.x -- confirmed by a real ImportError in this session (transformers
+# 5.17.0): "Qwen2VLVideoProcessor requires the Torchvision library". Without
+# it, BOTH the V10 VLM fallback (extract_fields_independent/fullpage) AND
+# the V19 Qwen2-VL direct-semantic engine (extract_direct_semantic) fail at
+# model load -- this is not new-code-specific, it's a shared vlm.py._load().
+torchvision>=0.19
+
 # Model weights (models/Qwen2-VL-2B-Instruct/) are NOT installed via pip --
 # download separately (see vlm.py's VLM_MODEL_PATH / DEFAULT_LOCAL_CANDIDATES)
 # and are gitignored (*.safetensors/*.bin/*.pt in .gitignore).
+
+# V19 multi-extractor benchmark (extractors.py) -- official SDK for the
+# Gemini API-based engine (gemini-3.8-flash). Imported LAZILY inside
+# extractors.run_gemini (same optional-dependency pattern as vlm.py above),
+# so a missing package only breaks calling THAT engine, not app.py/
+# evaluation.py startup or the v18/other-engine routes. API key read from
+# env var ONLY (GEMINI_API_KEY, see .env.example) -- never hardcoded.
+# (Mistral OCR 4.1/`mistralai` was removed entirely per explicit user
+# request -- gemini-2.5-flash and mistral-ocr-4-1 are no longer selectable
+# engines, see extractors.ENGINE_LABELS.)
+google-genai>=2.22.0
+python-dotenv>=1.2.3  # optional convenience: auto-loads .env in app.py/evaluation.py if present
+
+# Hosted Qwen3-VL test ("qwen3_vl" engine, extractors.run_qwen3_vl_hosted /
+# vlm.extract_direct_semantic_hosted) -- calls Qwen/Qwen3-VL-2B-Instruct on
+# Hugging Face's hosted inference infrastructure. Needs NEITHER torch NOR
+# transformers (those stay above, still required for the separate local V10/
+# V12 VLM fallback used inside pipeline.py, unrelated to this engine).
+huggingface_hub>=0.26

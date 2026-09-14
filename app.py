@@ -41,9 +41,21 @@ from pydantic import BaseModel
 
 import comparison
 import data_input
+import extractors
 import pipeline
 import preprocessing as prep
 import postprocessing as post
+
+# V19 -- optional: auto-load GEMINI_API_KEY/HF_TOKEN from a local
+# .env file if python-dotenv is installed (see .env.example). Guarded so a
+# missing .env or missing package is a silent no-op -- API keys can also
+# just be exported in the shell environment directly, this is convenience
+# only, never required.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -71,6 +83,15 @@ _SESSIONS_LOCK = threading.Lock()
 _PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"']*|(?<![\w.])/[^\s\"']*|\\\\[^\s\"']*")
 
 _ERROR_HINTS = [
+    # V19 -- extractor API errors (extractors.ExtractorError), diperiksa
+    # DULUAN (lebih spesifik) sebelum hint generik connection/timeout di
+    # bawah supaya pesan yg ditampilkan tepat menyebut extractor, bukan
+    # "gagal mengunduh dokumen" yg membingungkan utk kegagalan API model.
+    (r"(?i)api[_ ]?key.*(not set|tidak|missing)|environment variable is not set", "API key extractor belum diisi (lihat .env)."),
+    (r"(?i)unauthorized|invalid api key|authentication|permission_denied|api key not valid", "API key extractor tidak valid/ditolak."),
+    (r"(?i)rate limit|quota|resource_exhausted|too many requests", "Batas rate/quota API extractor tercapai, coba lagi nanti."),
+    (r"(?i)google-genai package not installed", "Package SDK extractor belum terpasang (lihat requirements.txt)."),
+    (r"(?i)invalid structured response", "Respons extractor tidak sesuai skema yang diharapkan."),
     (r"(?i)pdf tidak memiliki halaman", "Dokumen PDF kosong (tidak memiliki halaman)."),
     (r"(?i)gagal membaca file|imread|cannot identify image", "Berkas dokumen tidak dapat dibaca (format tidak didukung/file rusak)."),
     (r"(?i)memoryerror|out of memory", "Server kehabisan memori saat memproses dokumen."),
@@ -165,21 +186,33 @@ def _ensure_template_roi_image():
     return _save_preview_image(img, cache_path.name)
 
 
-def _run_ocr_and_format(request_id, document_path, data_entry_record=None):
-    """Jalankan pipeline penuh untuk satu dokumen -> payload response siap kirim.
+def _run_ocr_and_format(request_id, document_path, data_entry_record=None, engine="v18"):
+    """Jalankan extractor penuh untuk satu dokumen -> payload response siap kirim.
     PENTING: pemanggil WAJIB sudah men-set progress awal untuk request_id ini
     SEBELUM memanggil fungsi ini (mis. sebelum proses download dokumen yang
-    bisa makan waktu), supaya GET /api/progress/{id} tidak 404 di fase awal."""
+    bisa makan waktu), supaya GET /api/progress/{id} tidak 404 di fase awal.
+
+    V19: `engine` menentukan SATU extractor yang dipakai (lihat extractors.py
+    -- "v18" [default, pipeline lama TIDAK berubah], "gemini-3.8-flash",
+    "qwen3_vl"). extractors.run() adalah dispatcher
+    TUNGGAL -- TIDAK PERNAH menjalankan >1 extractor utk satu dokumen, TIDAK
+    PERNAH fallback diam-diam ke extractor lain kalau yang dipilih gagal
+    (kegagalan API tetap kegagalan, ditangkap oleh try/except pemanggil yang
+    SUDAH ADA -- lihat process_document/_process_one_record)."""
 
     def progress_callback(payload):
         _set_progress(request_id, status="processing", **payload)
 
-    # V10: reference_record dipakai HANYA di dalam pipeline utk memutuskan
+    # V10: reference_record dipakai HANYA di dalam pipeline V18 utk memutuskan
     # kapan VLM mismatch-verification dipicu -- nilainya TIDAK PERNAH
     # dikirim ke prompt VLM (lihat pipeline._run_vlm_fallback). Argumen ini
-    # OPSIONAL (default None) supaya panggilan lama tetap valid.
-    result = pipeline.run_pipeline(
-        str(document_path), progress_callback=progress_callback, reference_record=data_entry_record
+    # OPSIONAL (default None) supaya panggilan lama tetap valid. V19: engine
+    # Gemini TIDAK PERNAH menerima reference_record sama sekali (lihat
+    # extractors.run_gemini -- parameter ini bahkan tidak ada di
+    # signature-nya) -- kebocoran data referensi scr struktural tidak
+    # mungkin terjadi utk engine itu.
+    result = extractors.run(
+        engine, str(document_path), progress_callback=progress_callback, reference_record=data_entry_record
     )
 
     _set_progress(request_id, status="processing", step="save_debug", percent=98, message="Menyimpan gambar debug ROI")
@@ -194,6 +227,12 @@ def _run_ocr_and_format(request_id, document_path, data_entry_record=None):
     roi_document_url = _save_preview_image(result["debug_images"]["document"], f"{request_id}_roi_document.jpg")
 
     fields = result["fields"]
+    ocr_meta = result.get("ocr_meta") or {}
+    # fallback_source: "Qwen3-VL Hosted" for engine="qwen3_vl" (see
+    # extractors.run_qwen3_vl_hosted -- this engine never silently falls back
+    # to OCR/ROI, so this is the only value it ever reports). Absent (None)
+    # for every other engine.
+    fallback_source = ocr_meta.get("fallback_source")
     decision_v9_2 = None
     if data_entry_record:
         fields = comparison.attach_data_entry(fields, data_entry_record)
@@ -204,6 +243,13 @@ def _run_ocr_and_format(request_id, document_path, data_entry_record=None):
         # Urban/Rural di data_entry_record (lihat comparison.compute_decision).
         decision_v9_2 = comparison.compute_decision(
             fields, result["raw_results"], result["choice_groups"], data_entry_record)
+        # V19 sec 6 -- record fallback source in notes (informational only,
+        # NEVER changes the OK/TOLAK/REVIEW decision itself -- comparison.py
+        # is not touched). Only noted when an ACTUAL fallback happened
+        # (engine="qwen3_vl" never falls back, so it never reaches here).
+        if fallback_source and fallback_source != "Qwen3-VL Hosted":
+            decision_v9_2 = dict(decision_v9_2)
+            decision_v9_2["notes"] = list(decision_v9_2.get("notes") or []) + [f"Engine Fallback: {fallback_source}"]
     # final_status: dipakai sbg fallback utk Tab 1 (upload manual tanpa
     # pembanding), tetap dihitung selalu.
     final_status = comparison.compute_final_status(fields)
@@ -222,7 +268,14 @@ def _run_ocr_and_format(request_id, document_path, data_entry_record=None):
         "roi_document_url": roi_document_url,
         "final_status": final_status,
         "decision_v9_2": decision_v9_2,
-        "ocr_meta": result.get("ocr_meta"),
+        "engine": engine,
+        "engine_label": extractors.ENGINE_LABELS.get(engine, engine),
+        "ocr_meta": ocr_meta,
+        "fallback_source": fallback_source,
+        # V19 sec 7-9 -- present ONLY for records that actually called
+        # Gemini (extractors.run_gemini sets this; every other engine's
+        # result dict has no "gemini_usage" key at all, so this is None).
+        "gemini_usage": result.get("gemini_usage"),
     }
 
 
@@ -277,16 +330,26 @@ async def upload_document(file: UploadFile = File(...)):
         return JSONResponse(status_code=500, content={"error": "Gagal membaca file.", "detail": detail})
 
 
+class ProcessPayload(BaseModel):
+    engine: str = ""  # V19 -- WAJIB salah satu extractors.ENGINES, lihat validasi di bawah
+
+
 @app.post("/api/process/{request_id}")
-def process_document(request_id: str):
-    """STEP 2: jalankan pipeline OCR penuh untuk file yang sudah diupload.
-    Progress untuk request_id ini sudah di-set sejak /api/upload, jadi aman."""
+def process_document(request_id: str, payload: ProcessPayload):
+    """STEP 2: jalankan extractor penuh untuk file yang sudah diupload.
+    Progress untuk request_id ini sudah di-set sejak /api/upload, jadi aman.
+    V19: `payload.engine` WAJIB diisi salah satu extractors.ENGINES -- frontend
+    HARUS mencegah tombol Run aktif sebelum extractor dipilih (lihat
+    static/index.html), tapi divalidasi lagi di sini sbg jaring pengaman
+    server-side (mis. panggilan API langsung tanpa lewat UI)."""
+    if payload.engine not in extractors.ENGINES:
+        return JSONResponse(status_code=400, content={"error": "Pilih extractor terlebih dahulu."})
     matches = list(UPLOAD_DIR.glob(f"{request_id}.*"))
     if not matches:
         return JSONResponse(status_code=404, content={"error": "File tidak ditemukan. Upload ulang."})
     try:
         _set_progress(request_id, status="processing", step="start", percent=8, message="Memulai pipeline OCR")
-        return _run_ocr_and_format(request_id, matches[0])
+        return _run_ocr_and_format(request_id, matches[0], engine=payload.engine)
     except Exception as exc:
         traceback.print_exc()  # detail lengkap cukup di log server, TIDAK dikirim ke client
         detail = sanitize_error(exc)
@@ -305,6 +368,7 @@ class SheetUrlPayload(BaseModel):
 
 class SheetSubmitPayload(BaseModel):
     selector: str = ""  # mis. "1,3,5-8". Kosong = semua record.
+    engine: str = ""    # V19 -- WAJIB salah satu extractors.ENGINES, dipakai utk SELURUH batch
 
 
 def _new_session(records):
@@ -317,6 +381,7 @@ def _new_session(records):
             "errors": {},
             "final_status": {},
             "cancel_requested": False,  # V15: lihat /api/sheet/cancel + _process_batch
+            "engine": None,  # V19 -- di-set saat /api/sheet/submit, SATU extractor utk seluruh batch
         }
     return session_id
 
@@ -367,7 +432,9 @@ def _process_one_record(session_id, record):
             _set_progress(request_id, status="error", step="no_document", percent=0, message=session["errors"][record_no])
             return
 
-        result = _run_ocr_and_format(request_id, document_path, data_entry_record=record)
+        result = _run_ocr_and_format(
+            request_id, document_path, data_entry_record=record, engine=session.get("engine") or "v18"
+        )
         # V15.2: preview_url dulu di-load+simpan TERPISAH (`_preview.jpg`) di
         # sini, SEBELUM _run_ocr_and_format -- duplikat kerja krn pipeline.
         # run_pipeline() di dalamnya SUDAH memuat & mengembalikan dokumen
@@ -416,11 +483,18 @@ def submit_sheet_batch(session_id: str, payload: SheetSubmitPayload):
     if session is None:
         return JSONResponse(status_code=404, content={"error": "Sesi spreadsheet tidak ditemukan. Muat ulang."})
 
+    # V19 -- SATU extractor utk SELURUH batch (individual/index-range/bulk
+    # SEMUA lewat jalur ini, lihat runRecords() di static/index.html) --
+    # TIDAK PERNAH per-record berbeda dalam satu submit.
+    if payload.engine not in extractors.ENGINES:
+        return JSONResponse(status_code=400, content={"error": "Pilih extractor terlebih dahulu."})
+
     valid_indices = [r["Record"] for r in session["records"]]
     indices = data_input.parse_record_selector(payload.selector, valid_indices)
     if not indices:
         return JSONResponse(status_code=400, content={"error": "Tidak ada record valid pada index/range yang diberikan."})
 
+    session["engine"] = payload.engine
     session["cancel_requested"] = False  # run baru -- pastikan tidak langsung kebawa cancel dari run sebelumnya
     for record_no in indices:
         session["status"][record_no] = "queued"
@@ -440,6 +514,31 @@ def cancel_sheet_batch(session_id: str):
         return JSONResponse(status_code=404, content={"error": "Sesi spreadsheet tidak ditemukan. Muat ulang."})
     session["cancel_requested"] = True
     return {"session_id": session_id, "cancel_requested": True}
+
+
+def _compute_session_gemini_summary(session):
+    """V19 sec 9 -- session/batch totals, counted ONLY over records that
+    ACTUALLY called Gemini (result["gemini_usage"] present -- see
+    extractors.run_gemini). v18/Mistral/Qwen records (including Qwen's own
+    fallback to v18) never carry "gemini_usage", so they never inflate this
+    -- "if Gemini is only used as fallback, count only the actual Gemini
+    call" falls out naturally since there IS no Gemini fallback path here."""
+    documents = 0
+    totals = {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0,
+              "total_tokens": 0, "estimated_cost_usd": 0.0, "estimated_cost_idr": 0.0}
+    for result in session["results"].values():
+        usage = (result or {}).get("gemini_usage")
+        if not usage:
+            continue
+        documents += 1
+        for key in totals:
+            totals[key] += usage.get(key) or 0
+    return {
+        "documents": documents,
+        **totals,
+        "average_cost_usd_per_document": round(totals["estimated_cost_usd"] / documents, 6) if documents else 0.0,
+        "average_cost_idr_per_document": round(totals["estimated_cost_idr"] / documents, 2) if documents else 0.0,
+    }
 
 
 @app.get("/api/sheet/batch-status/{session_id}")
@@ -482,6 +581,9 @@ def sheet_batch_status(session_id: str):
         "total": len(session["records"]),
         "active": active,
         "cancel_requested": session.get("cancel_requested", False),
+        "engine": session.get("engine"),  # V19 -- extractor sedang/terakhir dipakai utk sesi ini
+        "engine_label": extractors.ENGINE_LABELS.get(session.get("engine"), session.get("engine")),
+        "gemini_usage_summary": _compute_session_gemini_summary(session),  # V19 sec 9
     }
 
 
@@ -517,13 +619,29 @@ def export_sheet_excel(session_id: str):
     rows = []
     for record in session["records"]:
         record_no = record["Record"]
-        result = session["results"].get(record_no)
-        decision = (result or {}).get("decision_v9_2")
+        result = session["results"].get(record_no) or {}
+        decision = result.get("decision_v9_2")
         final_status_text, notes_text = _decision_to_export_text(decision)
         row = dict(record)
         row["Status Proses"] = session["status"].get(record_no, "pending")
         row["Final Status"] = final_status_text
         row["Notes"] = notes_text
+        # V19 sec 10 -- engine/model/token usage/cost/fallback columns.
+        # "model" = the engine/model that ACTUALLY produced the data (from
+        # ocr_meta, e.g. "v18" when Qwen fell back), which can differ from
+        # "engine" = the engine the user SELECTED for this batch. Blank/zero
+        # Gemini usage for non-Gemini records (nothing to show).
+        ocr_meta = result.get("ocr_meta") or {}
+        usage = result.get("gemini_usage") or {}
+        row["engine"] = result.get("engine") or session.get("engine") or ""
+        row["model"] = ocr_meta.get("engine") or ""
+        row["input_tokens"] = usage.get("input_tokens", 0)
+        row["output_tokens"] = usage.get("output_tokens", 0)
+        row["thinking_tokens"] = usage.get("thinking_tokens", 0)
+        row["total_tokens"] = usage.get("total_tokens", 0)
+        row["cost_usd"] = usage.get("estimated_cost_usd", 0.0)
+        row["cost_idr"] = usage.get("estimated_cost_idr", 0.0)
+        row["fallback_source"] = result.get("fallback_source") or ""
         rows.append(row)
 
     try:

@@ -5,8 +5,9 @@
 *.onnx
 
 .venv/
+.env
 assets/ocr_*
-ver/
+ver/*
 outputs/
 uploads/
 downloaded_documents/

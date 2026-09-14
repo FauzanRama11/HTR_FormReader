@@ -91,6 +91,16 @@
   .field-summary-yellow { background: #fef3c7; border-color: #fde68a; color: #92400e; }
   .field-summary-neutral { background: #f3f4f6; border-color: #d1d5db; color: #4b5563; }
   .field-summary-line { margin: 3px 0; }
+
+  /* V19 -- compact Gemini token/cost usage panel (Tab 1 per-doc, Tab 2
+     per-record + session totals). Only rendered when gemini_usage is
+     actually present (never for non-Gemini records/engines). */
+  .gemini-usage-box { border-radius: 8px; padding: 10px 14px; margin: 8px 0 14px; border: 1px solid #bae6fd; background: #f0f9ff; color: #075985; font-size: 13px; }
+  .gemini-usage-title { font-weight: 700; margin-bottom: 6px; }
+  .gemini-usage-table { border-collapse: collapse; font-size: 12px; }
+  .gemini-usage-table td { padding: 1px 10px 1px 0; }
+  .gemini-usage-table td:first-child { color: #0369a1; }
+  .gemini-usage-table td:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
   .field-summary-label { font-weight: 700; display: inline-block; min-width: 82px; }
   .field-summary-intro { margin: 2px 0 8px; color: #4b5563; font-size: 13px; }
   .detail-heading-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
@@ -356,7 +366,16 @@
   <div class="upload-section">
     <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf">
     <br><br>
-    <button id="processBtn">Proses Dokumen</button>
+    <label for="engineSelect">Extractor</label>
+    <select id="engineSelect">
+      <option value="">Select extractor…</option>
+      <option value="v18">V18 Existing</option>
+      <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
+      <option value="qwen3_vl">Qwen3-VL-2B (HF Hosted)</option>
+      <option value="qwen3_vl_local">Qwen3-VL-2B (Local GPU, EXPERIMENTAL)</option>
+    </select>
+    <br><br>
+    <button id="processBtn" disabled>Proses Dokumen</button>
   </div>
   <div id="message"></div>
 
@@ -384,6 +403,7 @@
   <div class="table-section" id="tableSection" style="display:none;">
     <h3>Hasil Ekstraksi <span id="tab1FinalStatus"></span></h3>
     <div id="tab1HasilAkhir" class="hasil-akhir-box" style="display:none;"></div>
+    <div id="tab1GeminiUsage" class="gemini-usage-box" style="display:none;"></div>
     <table id="resultTable">
       <thead><tr><th>Field</th><th>Data Entry</th><th>Data OCR</th><th>Status</th></tr></thead>
       <tbody id="resultBody"></tbody>
@@ -461,17 +481,28 @@
           <h3 id="recordTableHeading">Record Table</h3>
         </div>
         <div class="record-content">
+          <div id="sheetGeminiUsageSummary" class="gemini-usage-box" style="display:none;"></div>
           <div class="record-toolbar">
             <div class="toolbar-group">
               <input type="text" id="sheetSearchInput" class="search-input" placeholder="Cari nama, rekening, nominal, status...">
             </div>
             <div class="toolbar-group">
+              <label for="sheetEngineSelect" style="font-size:12px;color:#4b5563;">Extractor:</label>
+              <select id="sheetEngineSelect">
+                <option value="">Select extractor…</option>
+                <option value="v18">V18 Existing</option>
+                <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
+                <option value="qwen3_vl">Qwen3-VL-2B (HF Hosted)</option>
+                <option value="qwen3_vl_local">Qwen3-VL-2B (Local GPU, EXPERIMENTAL)</option>
+              </select>
+            </div>
+            <div class="toolbar-group">
               <input type="text" id="sheetSelectorInput" placeholder="Index/Range, mis. 1,3,5-8">
-              <button id="sheetSubmitBtn" class="btn-sm">Jalankan Index/Range</button>
+              <button id="sheetSubmitBtn" class="btn-sm" disabled>Jalankan Index/Range</button>
             </div>
             <div class="toolbar-group">
               <span class="tail-info"><span id="checkedCount">0</span> selected</span>
-              <button id="sheetBulkRunBtn" class="btn-sm">Jalankan yang Dicentang</button>
+              <button id="sheetBulkRunBtn" class="btn-sm" disabled>Jalankan yang Dicentang</button>
             </div>
             <div class="toolbar-group">
               <button id="sheetStopBtn" class="btn-sm btn-stop" disabled>Stop</button>
@@ -538,6 +569,7 @@
       </div>
       <p class="field-summary-intro">Pemeriksaan difokuskan pada tujuh field utama berikut; status menunjukkan kesesuaian hasil OCR terhadap data entry.</p>
       <div id="sheetFieldSummary" class="field-summary-box field-summary-neutral">Belum ada hasil.</div>
+      <div id="sheetGeminiUsage" class="gemini-usage-box" style="display:none;"></div>
       <h3 style="margin-top:16px;">Detail Per Field</h3>
       <table id="sheetResultTable">
         <thead><tr><th>Field</th><th>Data Entry</th><th>Data OCR</th><th>Status</th></tr></thead>
@@ -674,6 +706,48 @@ function renderFieldsTable(tbody, fields, withDataEntry) {
 }
 
 // ============================================================================
+// V19 -- Gemini token/cost usage (compact, sec 9). Only rendered when usage
+// is actually present -- hidden entirely for non-Gemini records/sessions.
+// ============================================================================
+function fmtInt(n) { return (n || 0).toLocaleString("id-ID"); }
+function fmtUsd(n) { return `$${(n || 0).toFixed(4)}`; }
+function fmtIdr(n) { return `Rp${Math.round(n || 0).toLocaleString("id-ID")}`; }
+
+function renderGeminiUsage(box, usage) {
+  if (!box) return;
+  if (!usage) { box.style.display = "none"; box.innerHTML = ""; return; }
+  box.style.display = "block";
+  box.innerHTML = `
+    <div class="gemini-usage-title">Gemini Usage — ${usage.model || "-"}</div>
+    <table class="gemini-usage-table">
+      <tr><td>Input</td><td>${fmtInt(usage.input_tokens)}</td></tr>
+      <tr><td>Output</td><td>${fmtInt(usage.output_tokens)}</td></tr>
+      <tr><td>Thinking</td><td>${fmtInt(usage.thinking_tokens)}</td></tr>
+      <tr><td>Total</td><td>${fmtInt(usage.total_tokens)}</td></tr>
+      <tr><td>Cost USD</td><td>${fmtUsd(usage.estimated_cost_usd)}</td></tr>
+      <tr><td>Cost IDR</td><td>${fmtIdr(usage.estimated_cost_idr)}</td></tr>
+    </table>`;
+}
+
+function renderGeminiUsageSummary(box, summary) {
+  if (!box) return;
+  if (!summary || !summary.documents) { box.style.display = "none"; box.innerHTML = ""; return; }
+  box.style.display = "block";
+  box.innerHTML = `
+    <div class="gemini-usage-title">Gemini Usage — Session Totals</div>
+    <table class="gemini-usage-table">
+      <tr><td>Documents</td><td>${fmtInt(summary.documents)}</td></tr>
+      <tr><td>Input Tokens</td><td>${fmtInt(summary.input_tokens)}</td></tr>
+      <tr><td>Output Tokens</td><td>${fmtInt(summary.output_tokens)}</td></tr>
+      <tr><td>Thinking Tokens</td><td>${fmtInt(summary.thinking_tokens)}</td></tr>
+      <tr><td>Total Tokens</td><td>${fmtInt(summary.total_tokens)}</td></tr>
+      <tr><td>Total USD</td><td>${fmtUsd(summary.estimated_cost_usd)}</td></tr>
+      <tr><td>Total IDR</td><td>${fmtIdr(summary.estimated_cost_idr)}</td></tr>
+      <tr><td>Avg Cost / Doc</td><td>${fmtUsd(summary.average_cost_usd_per_document)} (${fmtIdr(summary.average_cost_idr_per_document)})</td></tr>
+    </table>`;
+}
+
+// ============================================================================
 // PREVIEW HELPERS (dipakai Tab 1 & Tab 2) -- render graceful: placeholder
 // selagi URL belum ada, gambar HANYA dipasang ke DOM setelah berhasil
 // dimuat (supaya tidak pernah muncul ikon broken-image), placeholder lain
@@ -705,6 +779,7 @@ function clearPreviewBoxes(boxes, loadingText) {
 // ============================================================================
 const fileInput = document.getElementById("fileInput");
 const processBtn = document.getElementById("processBtn");
+const engineSelect = document.getElementById("engineSelect");
 const messageBox = document.getElementById("message");
 const previewSection = document.getElementById("previewSection");
 const fileOriginalBox = document.getElementById("fileOriginalBox");
@@ -729,11 +804,23 @@ function showLoadingRow(tbody, colspan, text) {
   tbody.innerHTML = `<tr class="loading-row"><td colspan="${colspan}">${text}</td></tr>`;
 }
 
+// V19 -- Run TETAP nonaktif sampai extractor dipilih (default: tidak ada
+// pilihan); nonaktif lagi selama proses berjalan. SATU titik kontrol,
+// dipanggil dari engineSelect.change DAN dari awal/akhir click handler.
+function setTab1RunState(isProcessing) {
+  engineSelect.disabled = isProcessing;
+  processBtn.disabled = isProcessing || !engineSelect.value;
+}
+engineSelect.addEventListener("change", () => setTab1RunState(false));
+setTab1RunState(false);
+
 processBtn.addEventListener("click", async () => {
   const file = fileInput.files[0];
   if (!file) { messageBox.textContent = "Pilih file terlebih dahulu (jpg/jpeg/png/pdf)."; return; }
+  const engine = engineSelect.value;
+  if (!engine) { messageBox.textContent = "Pilih extractor terlebih dahulu."; return; }
 
-  processBtn.disabled = true;
+  setTab1RunState(true);
   messageBox.textContent = "";
   fileProgress.reset("Mengupload dokumen...");
   previewSection.style.display = "block";
@@ -742,6 +829,7 @@ processBtn.addEventListener("click", async () => {
   roiSection.style.display = "none";
   clearPreviewBoxes([fileOriginalBox, filePreprocessedBox, fileTemplateRoiBox, fileRoiDocumentBox], "Mengupload...");
   showLoadingRow(resultBody, 4, "Menunggu proses OCR selesai...");
+  renderGeminiUsage(document.getElementById("tab1GeminiUsage"), null);
 
   const formData = new FormData();
   formData.append("file", file);
@@ -761,7 +849,11 @@ processBtn.addEventListener("click", async () => {
     messageBox.textContent = "Dokumen terupload. Menjalankan OCR...";
     fileProgress.poll(uploadData.request_id);
 
-    const processRes = await fetch(`/api/process/${uploadData.request_id}`, { method: "POST" });
+    const processRes = await fetch(`/api/process/${uploadData.request_id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ engine }),
+    });
     const processData = await processRes.json();
 
     if (!processRes.ok) {
@@ -781,6 +873,7 @@ processBtn.addEventListener("click", async () => {
       resolveHasilAkhir(processData.final_status, processData.decision_v9_2)
     );
     renderHasilAkhir(document.getElementById("tab1HasilAkhir"), processData.final_status, processData.decision_v9_2);
+    renderGeminiUsage(document.getElementById("tab1GeminiUsage"), processData.gemini_usage);
     jsonOutput.textContent = JSON.stringify(processData.raw_json, null, 2);
     jsonDetails.style.display = "block";
 
@@ -791,7 +884,7 @@ processBtn.addEventListener("click", async () => {
       setPreviewImage(fileRoiDocumentBox, processData.roi_document_url, "roi document");
       roiSection.style.display = "block";
     }
-    messageBox.textContent = "Selesai diproses.";
+    messageBox.textContent = `Selesai diproses (${processData.engine_label || processData.engine || engine}).`;
   } catch (err) {
     fileProgress.stop();
     showLoadingRow(resultBody, 4, "Gagal memproses.");
@@ -800,7 +893,7 @@ processBtn.addEventListener("click", async () => {
     setPreviewImage(fileTemplateRoiBox, null, "", "Tidak tersedia (proses gagal)");
     setPreviewImage(fileRoiDocumentBox, null, "", "Tidak tersedia (proses gagal)");
   } finally {
-    processBtn.disabled = false;
+    setTab1RunState(false);
   }
 });
 
@@ -819,6 +912,7 @@ const sheetTableSection = document.getElementById("sheetTableSection");
 const sheetTableHead = document.getElementById("sheetTableHead");
 const sheetTableBody = document.getElementById("sheetTableBody");
 const sheetSelectorInput = document.getElementById("sheetSelectorInput");
+const sheetEngineSelect = document.getElementById("sheetEngineSelect");
 const sheetSubmitBtn = document.getElementById("sheetSubmitBtn");
 const sheetBulkRunBtn = document.getElementById("sheetBulkRunBtn");
 const sheetStopBtn = document.getElementById("sheetStopBtn");
@@ -1498,14 +1592,20 @@ function renderSheetTable() {
 // permanen hanya karena pernah diproses/dibatalkan/gagal.
 // ============================================================================
 function setProcessingState(isProcessing, cancelPending) {
+  // V19 -- Run (bulk/index-range/per-row) TETAP nonaktif sampai extractor
+  // dipilih (default: tidak ada pilihan), terlepas dari isProcessing --
+  // digabung ke SATU titik kontrol yg sama, bukan pengecekan terpisah.
+  const engineChosen = !!sheetEngineSelect.value;
   sheetStopBtn.disabled = !isProcessing || !!cancelPending;
-  sheetBulkRunBtn.disabled = isProcessing || checkedRecords.size === 0;
-  sheetSubmitBtn.disabled = isProcessing;
+  sheetBulkRunBtn.disabled = isProcessing || checkedRecords.size === 0 || !engineChosen;
+  sheetSubmitBtn.disabled = isProcessing || !engineChosen;
+  sheetEngineSelect.disabled = isProcessing;
   sheetSelectorInput.disabled = isProcessing;
   document.querySelectorAll("#sheetTableBody .row-check").forEach((cb) => { cb.disabled = isProcessing; });
-  document.querySelectorAll("#sheetTableBody button[data-action='run']").forEach((btn) => { btn.disabled = isProcessing; });
+  document.querySelectorAll("#sheetTableBody button[data-action='run']").forEach((btn) => { btn.disabled = isProcessing || !engineChosen; });
   syncCheckAllBoxState(isProcessing);
 }
+sheetEngineSelect.addEventListener("change", () => setProcessingState(isRunLocked()));
 
 function renderTailInfo() {
   const filteredLen = getFilteredRecords().length;
@@ -1657,10 +1757,15 @@ sheetExportBtn.addEventListener("click", async () => {
 // akhir -- tidak ada jalur yang bisa meninggalkan UI nyangkut setengah terkunci.
 async function runRecords(recordNos, rawSelector) {
   if (!currentSessionId) { sheetMessage.textContent = "Muat data Excel/Google Spreadsheet terlebih dahulu."; return; }
+  // V19 -- SATU extractor terpilih dipakai utk SELURUH panggilan ini (per-
+  // baris/bulk/index-range semua lewat fungsi ini) -- server juga memvalidasi
+  // ulang (lihat app.py submit_sheet_batch), ini jaring pengaman UI.
+  const engine = sheetEngineSelect.value;
+  if (!engine) { sheetMessage.textContent = "Pilih extractor terlebih dahulu."; return; }
   const selector = rawSelector !== undefined ? rawSelector : (recordNos || []).join(",");
   try {
     const res = await fetch(`/api/sheet/submit/${currentSessionId}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selector }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selector, engine }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -1720,7 +1825,9 @@ function startBatchPolling() {
         updateStatusCells();
         saveSessionToLocalStorage();
         hydrateDoneFinalStatuses(data.status);
-        sheetBatchSummary.textContent = `${data.done_count}/${data.total} record selesai diproses.`;
+        const engineNote = data.engine_label ? ` (${data.engine_label})` : "";
+        sheetBatchSummary.textContent = `${data.done_count}/${data.total} record selesai diproses${engineNote}.`;
+        renderGeminiUsageSummary(document.getElementById("sheetGeminiUsageSummary"), data.gemini_usage_summary);
         const stillRunning = Object.values(data.status).some((s) => s === "queued" || s === "processing");
         // Stop SELALU tampil (tidak pernah display:none); checkbox/tombol
         // run ikut terbuka kembali otomatis begitu stillRunning=false --
@@ -1755,6 +1862,7 @@ async function fetchSheetResult(record) {
   // Bersihkan preview record SEBELUMNYA dulu supaya tidak pernah kelihatan
   // nyangkut selagi hasil record baru ini masih dimuat.
   clearPreviewBoxes([sheetOriginalBox, sheetPreprocessedBox, sheetTemplateRoiBox, sheetRoiDocumentBox], "Memuat...");
+  renderGeminiUsage(document.getElementById("sheetGeminiUsage"), null);
   sheetDetail.scrollIntoView({ behavior: "smooth", block: "start" });
 
   // Coba dari localStorage dulu (lebih cepat, tidak bergantung sesi server).
@@ -1801,6 +1909,7 @@ function renderSheetDetail(data) {
     );
   }
   renderFieldSummary(sheetFieldSummary, data.fields);
+  renderGeminiUsage(document.getElementById("sheetGeminiUsage"), data.gemini_usage);
   // Simpan juga ke batchDecision supaya kolom Final Status di tabel list ikut
   // konsisten kalau user kembali ke Tab 2 tanpa reload (decision baru saja
   // diambil lewat fetch hasil, bukan lewat batch-status polling).
