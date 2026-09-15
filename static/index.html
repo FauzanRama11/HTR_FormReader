@@ -302,6 +302,15 @@
     color: #475569;
   }
 
+  /* V19f: satu badge per RECORD (bukan per field) yang menampilkan extractor
+     yang benar-benar dipakai (lihat app.py's "Extractor: {engine_label}"
+     note, notesCellHtml/noteBadgeClass di bawah). */
+  .note-extractor {
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    color: #334155;
+  }
+
   
   /* FIX: global button:disabled sebelumnya menimpa warna Notes menjadi gelap */
   button.note-badge:disabled {
@@ -1228,11 +1237,28 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+// V19f: label PERSIS yg sudah dikirim backend (comparison._extra_validation_
+// notes) -- jangan ikut lolos ke aturan substring generik di bawah, yg bisa
+// salah label (mis. "Tenor Conflict" mengandung substring "tenor" -> kalau
+// tidak di-exempt akan collapse jadi "Tenor Tidak Sesuai", padahal artinya
+// beda: konflik choice vs tanggal, bukan mismatch ke data referensi).
+const EXACT_NOTE_LABELS = new Set([
+  "Name Mismatch", "Name Uncertain", "Invalid/Reversed Date Range",
+  "Tenor Conflict", "Reward Uncertain", "Signature Absent",
+]);
+
 function normalizeNoteLabel(note) {
   const raw = String(note || "").trim();
   const low = raw.toLowerCase();
 
   if (!raw) return null;
+  if (EXACT_NOTE_LABELS.has(raw)) return raw;
+  // V19f: badge extractor per-record (mis. "Extractor: Qwen3-VL-2B (Local
+  // GPU, EXPERIMENTAL)", lihat app.py _run_ocr_and_format) -- label PERSIS
+  // dari backend (extractors.ENGINE_LABELS), tidak pernah di-generate/
+  // dipetakan ulang di sini.
+  if (low.startsWith("extractor:")) return raw;
+
   if (low.includes("roi")) return "ROI Bermasalah";
   if (low.includes("fallback")) return "Fallback OCR Digunakan";
   if (low.includes("ocr") && (low.includes("yakin") || low.includes("confidence") || low.includes("rendah"))) {
@@ -1245,11 +1271,13 @@ function normalizeNoteLabel(note) {
 }
 
 function noteBadgeClass(label) {
+  const low = String(label || "").toLowerCase();
   if (label === "ROI Bermasalah") return "note-roi";
   if (label === "OCR Kurang Yakin") return "note-ocr";
   if (label === "Fallback OCR Digunakan") return "note-fallback";
-  if (label === "Tenor Tidak Sesuai") return "note-tenor";
-  if (label === "Reward Tidak Sesuai") return "note-reward";
+  if (low.startsWith("extractor:")) return "note-extractor";
+  if (label === "Tenor Tidak Sesuai" || label === "Tenor Conflict" || label === "Invalid/Reversed Date Range") return "note-tenor";
+  if (label === "Reward Tidak Sesuai" || label === "Reward Uncertain") return "note-reward";
   return "note-default";
 }
 
@@ -1702,18 +1730,21 @@ sheetBulkRunBtn.addEventListener("click", () => {
   runRecords([...checkedRecords]);
 });
 
-// V15: Stop -- batalkan SEMUA record yang masih queued (belum mulai diproses)
-// pada batch yang sedang berjalan. Record yang sudah mulai tetap diselesaikan
-// wajar (lihat app.py _process_batch); hasil yang sudah selesai tetap tersimpan.
+// V19f: Stop -- membatalkan SEGERA: record yang masih queued (belum mulai)
+// DAN record yang SEDANG berjalan saat ini (diinterupsi di antara tahap
+// mahal OCR/VLM, lihat app.py cancel_sheet_batch/pipeline.PipelineCancelled
+// -- TIDAK LAGI menunggu record yg sedang jalan selesai wajar). Hasil yang
+// sudah selesai sebelumnya tetap tersimpan.
 sheetStopBtn.addEventListener("click", async () => {
   if (!currentSessionId) return;
   // cancelPending=true: disable SEGERA (cegah klik ganda) sebelum poll
   // berikutnya sinkron -- kontrol lain (checkbox/run) TETAP terkunci sampai
-  // batch benar2 berhenti (record yg sedang jalan tetap diselesaikan wajar).
+  // batch benar2 berhenti (polling batch-status berhenti otomatis begitu
+  // tidak ada lagi record queued/processing -- lihat "active" di app.py).
   setProcessingState(isRunLocked(), true);
   try {
     await fetch(`/api/sheet/cancel/${currentSessionId}`, { method: "POST" });
-    sheetBatchSummary.textContent = "Menghentikan record yang belum diproses...";
+    sheetBatchSummary.textContent = "Menghentikan proses (termasuk record yang sedang berjalan)...";
   } catch (err) {
     sheetMessage.innerHTML = `<div class="error-box">Gagal menghentikan proses: ${err}</div>`;
     setProcessingState(isRunLocked(), false);

@@ -113,6 +113,16 @@ def _emit_progress(callback, step, percent, message, detail=None):
         pass
 
 
+class PipelineCancelled(Exception):
+    """V19f: raised by run_pipeline() (and by extractors.py's engine
+    functions, which also import this) when a caller-supplied cancel_event
+    is set. Checked at every EXISTING _emit_progress() checkpoint (see
+    run_pipeline's `emit` closure below) -- these are already the natural
+    "between expensive stages" boundaries the task asked for, so no new
+    checkpoints are added. app.py catches this to mark the record
+    "cancelled" instead of "error"."""
+
+
 def _padded_crop(image, bbox_px, shape, field_name=None, pad_ratio=0.30):
     x1, y1, x2, y2 = bbox_px
     w, h = x2 - x1, y2 - y1
@@ -658,17 +668,30 @@ def _apply_default_sources(raw_results, groups):
         group.setdefault("notes", _note_ocr_primary())
 
 
-def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=None, reference_record=None):
+def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=None, reference_record=None,
+                  cancel_event=None):
     """reference_record (OPSIONAL, V10): dict record spreadsheet, dipakai
     HANYA utk MEMUTUSKAN kapan VLM mismatch-verification dipicu -- nilainya
     TIDAK PERNAH dikirim ke prompt VLM. Pemanggil lama (tanpa argumen ini)
     tetap valid (default None -> mismatch_verification trigger tidak aktif,
-    perilaku setara V9.x + fallback recognition/geometry saja)."""
-    _emit_progress(progress_callback, "load", 8, "Memuat template dan dokumen")
+    perilaku setara V9.x + fallback recognition/geometry saja).
+
+    cancel_event (OPSIONAL, V19f): threading.Event -- diperiksa di SETIAP
+    checkpoint _emit_progress yang SUDAH ADA (lewat closure `emit` di bawah,
+    bukan checkpoint baru) supaya Stop/Cancel bisa menginterupsi record yang
+    SEDANG berjalan di antara tahap-tahap mahal (align/OCR/VLM fallback),
+    bukan hanya sebelum record berikutnya dimulai. Raise PipelineCancelled
+    kalau event sudah di-set; pemanggil (app.py) yang menangkapnya."""
+    def emit(step, percent, message, detail=None):
+        _emit_progress(progress_callback, step, percent, message, detail)
+        if cancel_event is not None and cancel_event.is_set():
+            raise PipelineCancelled(f"Dibatalkan pada tahap '{step}'")
+
+    emit("load", 8, "Memuat template dan dokumen")
     template_img = prep.load_document(template_path)
     filled_raw = prep.load_document(filled_path)
 
-    _emit_progress(progress_callback, "align", 20, "Menyiapkan & menyelaraskan dokumen (bandingkan asli vs rectify)")
+    emit("align", 20, "Menyiapkan & menyelaraskan dokumen (bandingkan asli vs rectify)")
     aligned_img, _, alignment = prep.prepare_and_align(filled_path, filled_raw, template_img)
     prep_meta = alignment.pop("input_preparation", {"rectified": False, "reason": "not_needed"})
     # V10: coverage_mask (piksel yg benar-benar berasal dari sumber, bukan
@@ -680,8 +703,8 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
     aligned_gray = cv2.cvtColor(aligned_img, cv2.COLOR_BGR2GRAY)
     shape = aligned_img.shape
 
-    _emit_progress(
-        progress_callback, "localize", 30,
+    emit(
+        "localize", 30,
         "Menghitung transform section (identity/placement) & region OCR gabungan",
     )
     raw_results, field_errors = {}, {}
@@ -695,8 +718,8 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
         dynamic_field_statuses, dynamic_section_meta = {}, {}
         field_errors["dynamic_extraction"] = str(exc)
 
-    _emit_progress(
-        progress_callback, "ocr_dynamic", 42, f"OCR region gabungan selesai ({dynamic_calls}x panggilan)",
+    emit(
+        "ocr_dynamic", 42, f"OCR region gabungan selesai ({dynamic_calls}x panggilan)",
         {"ocr_calls_dynamic": dynamic_calls, "regions": list(dynamic_regions_debug.keys()),
          "section_meta": dynamic_section_meta},
     )
@@ -732,15 +755,15 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
             "roi_source": "error", "change_ratio": 0.0, "status": "error", "error": str(exc),
         }
 
-    _emit_progress(
-        progress_callback, "ocr_batch", 55, f"Membaca sisa field (device={ocr.OCR_DEVICE})",
+    emit(
+        "ocr_batch", 55, f"Membaca sisa field (device={ocr.OCR_DEVICE})",
         {"fields_with_content": len(pending_crops) + len(dynamic_ocr), "total_fields": len(prep.FIELD_CONFIG)},
     )
     ocr_by_field, ocr_calls = ocr.run_batched_ocr(pending_crops)
     ocr_by_field.update(dynamic_ocr)
     ocr_calls += dynamic_calls
 
-    _emit_progress(progress_callback, "normalize", 65, "Normalisasi & validasi hasil OCR")
+    emit("normalize", 65, "Normalisasi & validasi hasil OCR")
     for name, cfg in prep.FIELD_CONFIG.items():
         if name in field_errors:
             continue
@@ -755,7 +778,7 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
     # ink-diff -- SEMUA deterministik/non-VLM, SAMA seperti sebelumnya. Ini
     # WAJIB selesai duluan supaya V12 tahu status "primary" LENGKAP (teks +
     # choice + signature) SEBELUM memutuskan field mana yang perlu fallback. -
-    _emit_progress(progress_callback, "choices", 70, "Mendeteksi pilihan tenor dan reward (OCR Primary)")
+    emit("choices", 70, "Mendeteksi pilihan tenor dan reward (OCR Primary)")
     groups, choice_raw = post.process_choices(
         template_img, aligned_img, template_gray, aligned_gray, shape, coverage_mask=coverage_mask
     )
@@ -783,7 +806,7 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
         "bentuk_reward": dict(groups["bentuk_reward"]),
     }
     
-    _emit_progress(progress_callback, "signatures", 74, "Mendeteksi area tanda tangan (OCR Primary)")
+    emit("signatures", 74, "Mendeteksi area tanda tangan (OCR Primary)")
     raw_results.update(post.process_signatures(
         template_img, aligned_img, template_gray, aligned_gray, shape, coverage_mask=coverage_mask
     ))
@@ -792,13 +815,13 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
     # crop ROI di tahap ini. Dipanggil kalau ADA field (teks/choice/
     # signature) yg statusnya not_detected/uncertain/review/low_confidence/
     # geometry_uncertain/invalid/conflict (requirement #2/#5). -------------
-    _emit_progress(progress_callback, "vlm_fullpage_fallback", 80, "Fallback Full-Page VLM (halaman penuh) utk field belum yakin")
+    emit("vlm_fullpage_fallback", 80, "Fallback Full-Page VLM (halaman penuh) utk field belum yakin")
     vlm_fullpage_meta = _run_vlm_fullpage_fallback(raw_results, groups, field_errors, aligned_img, dynamic_section_meta)
 
     # -- FALLBACK 2 (V12): ROI/Template crop (Paddle tight-crop, konfigurasi
     # ROI yang sudah ada) -- HANYA utk field teks yg MASIH belum yakin
     # setelah Full-Page VLM. --------------------------------------------
-    _emit_progress(progress_callback, "roi_template_fallback", 86, "Fallback ROI/template (crop rapat) utk field masih belum yakin")
+    emit("roi_template_fallback", 86, "Fallback ROI/template (crop rapat) utk field masih belum yakin")
     roi_template_meta, roi_template_calls = _run_roi_template_fallback(
         raw_results, field_errors, aligned_img, shape, dynamic_section_meta
     )
@@ -806,26 +829,26 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
 
     # -- FALLBACK 3 (V12): second-pass OCR/VLM di atas crop ROI/template yg
     # sama, utk field yg MASIH gagal setelah fallback 1 & 2. ---------------
-    _emit_progress(progress_callback, "roi_second_pass_vlm", 89, "Second-pass VLM di atas crop ROI/template utk field masih gagal")
+    emit("roi_second_pass_vlm", 89, "Second-pass VLM di atas crop ROI/template utk field masih gagal")
     roi_second_pass_meta = _run_roi_second_pass_vlm(raw_results, field_errors, aligned_img, shape, dynamic_section_meta)
 
     # -- Verifikasi VLM thd referensi spreadsheet (fitur terpisah, lihat
     # docstring _run_vlm_reference_check) -- TIDAK PERNAH mempengaruhi
     # keputusan akhir langsung, hanya menandai status utk direview. --------
-    _emit_progress(progress_callback, "vlm_reference_check", 91, "Mengevaluasi kebutuhan verifikasi VLM thd referensi")
+    emit("vlm_reference_check", 91, "Mengevaluasi kebutuhan verifikasi VLM thd referensi")
     vlm_reference_meta = _run_vlm_reference_check(raw_results, field_errors, aligned_img, shape, reference_record)
 
     # requirement #6: SETIAP field/grup WAJIB catat "source"/"notes", default
     # "ocr_primary" kalau tidak ada fallback yang mengubah nilai apa pun. ---
     _apply_default_sources(raw_results, groups)
 
-    _emit_progress(progress_callback, "format", 93, "Menyusun hasil ekstraksi")
+    emit("format", 93, "Menyusun hasil ekstraksi")
     final_results = dict(raw_results)
     final_results["tenor_penempatan"] = groups["tenor_penempatan"]
     final_results["bentuk_reward"] = groups["bentuk_reward"]
     fields_table = post.build_fields_table(final_results, post.FIELD_TYPES)
 
-    _emit_progress(progress_callback, "debug", 96, "Membuat visualisasi ROI (+ region OCR & token)")
+    emit("debug", 96, "Membuat visualisasi ROI (+ region OCR & token)")
     debug_results = {n: r for n, r in raw_results.items() if isinstance(r, dict) and r.get("roi_bbox")}
     debug_template = post.draw_debug(
         template_img, debug_results, choice_raw, template_mode=True, regions=dynamic_regions_debug
@@ -834,7 +857,7 @@ def run_pipeline(filled_path, template_path=TEMPLATE_PATH, progress_callback=Non
         aligned_img, debug_results, choice_raw, template_mode=False, regions=dynamic_regions_debug
     )
 
-    _emit_progress(progress_callback, "pipeline_done", 98, "Pipeline OCR selesai")
+    emit("pipeline_done", 98, "Pipeline OCR selesai")
     return {
         "alignment": alignment,
         "input_preparation": prep_meta,

@@ -32,9 +32,18 @@ FIELD_DATA_TYPES = {
     "bentuk_reward": "choice",
 }
 
-# V11: threshold fuzzy khusus nama_nasabah (sementara, lihat HANDOVER_V11_NEXT.md
-# #2). Nomor rekening/nominal TETAP exact/deterministic (tidak lewat jalur ini).
-NAME_FUZZY_MATCH_THRESHOLD = 80
+# V19f: nama_nasabah punya 3 state -- PASS/UNCERTAIN/MISMATCH -- bukan cuma
+# 1 threshold biner lagi. similarity >= NAME_PASS_THRESHOLD -> identik/variasi
+# OCR wajar (PASS). similarity < NAME_MISMATCH_THRESHOLD -> identitas jelas
+# beda (MISMATCH). Di antara keduanya -> tidak bisa dipastikan sama/beda,
+# TIDAK auto-lanjut (UNCERTAIN -> REVIEW), sesuai kebijakan "err toward
+# review" utk nama. Threshold diverifikasi thd data eval real (lihat
+# eval_runs/evaluation_results_qwen_local_v2_fixed.csv record 6/7): Ratem/
+# Ratem=100 -> PASS, Ratem/Ratzen=72.7 & Mulyani/Nuryani=71.4 -> UNCERTAIN,
+# Ratem/Asep=44.4 -> MISMATCH. Nomor rekening/nominal TETAP exact/
+# deterministic (tidak lewat jalur ini).
+NAME_PASS_THRESHOLD = 90
+NAME_MISMATCH_THRESHOLD = 55
 
 
 def _name_similarity(a, b):
@@ -52,7 +61,9 @@ def is_field_match(value_a, value_b, data_type):
     keduanya TIDAK PERNAH berbeda kesimpulan utk field yang sama (nama_nasabah
     khususnya, lihat handover #2: "jangan sampai UI menunjukkan sesuai tetapi
     decision backend masih TOLAK karena exact match lama").
-    Return (is_match: bool, similarity: float|None) -- similarity hanya
+    Return (match, similarity) -- match adalah True/False utk semua data_type,
+    KECUALI 'name' yang punya state ke-3 literal string "uncertain" (lihat
+    NAME_PASS_THRESHOLD/NAME_MISMATCH_THRESHOLD di atas). similarity hanya
     terisi utk data_type 'name' (disimpan utk audit)."""
     norm_a = _normalize_for_compare(value_a, data_type)
     norm_b = _normalize_for_compare(value_b, data_type)
@@ -60,7 +71,11 @@ def is_field_match(value_a, value_b, data_type):
         return False, None
     if data_type == "name":
         similarity = _name_similarity(norm_a, norm_b)
-        return similarity >= NAME_FUZZY_MATCH_THRESHOLD, similarity
+        if similarity >= NAME_PASS_THRESHOLD:
+            return True, similarity
+        if similarity < NAME_MISMATCH_THRESHOLD:
+            return False, similarity
+        return "uncertain", similarity
     return norm_a == norm_b, None
 
 
@@ -127,7 +142,7 @@ def attach_data_entry(fields_table, record):
         if similarity is not None:
             row["name_similarity"] = similarity  # audit trail (V11 fuzzy nama)
         row["display_status"] = _display_status(row.get("status"), match)
-        if match is False:
+        if match is False or match == "uncertain":
             detail = f"data spreadsheet='{entry_value}' vs dokumen='{ocr_value}'"
             if similarity is not None:
                 detail += f" (similarity {similarity:.0f}%)"
@@ -139,11 +154,15 @@ def attach_data_entry(fields_table, record):
 def _display_status(field_status, match):
     """Satu label status final untuk tabel hasil: gabung status field OCR
     (read/review/blank/not_detected/detected/conflict/uncertain/...) dengan
-    hasil match data entry."""
+    hasil match data entry. match=="uncertain" (nama, lihat is_field_match)
+    -> 'perlu_review', BUKAN 'sesuai' atau 'tidak_sesuai' -- tidak pernah
+    ditampilkan seolah sudah dipastikan cocok."""
     if match is True:
         return "sesuai"
     if match is False:
         return "tidak_sesuai"
+    if match == "uncertain":
+        return "perlu_review"
     return field_status or "-"
 
 
@@ -317,6 +336,11 @@ def _validate_simple(doc_value, ref_value, data_type, label, doc_status=None):
     if not ref_n:
         return "REVIEW", f"{label} tidak ada data referensi"
     match, similarity = is_field_match(doc_value, ref_value, data_type)
+    if match == "uncertain":
+        detail = f"{label} tidak bisa dipastikan sama (kemungkinan variasi OCR): dokumen={doc_value}, referensi={ref_value}"
+        if similarity is not None:
+            detail += f" (similarity {similarity:.0f}%)"
+        return "REVIEW", detail
     if not match:
         detail = f"{label} tidak sesuai: dokumen={doc_value}, referensi={ref_value}"
         if similarity is not None:
@@ -335,7 +359,10 @@ def validate_tenor(raw_results, choice_groups, ref_tenor):
     choice_value, choice_status = choice.get("value"), choice.get("status")
     range_raw = (raw_results.get("rentang_tenor") or {}).get("raw")
     derived_value, derive_reason = derive_tenor_from_range(range_raw)
-    evidence = {"choice": choice_value, "date_range_derived": derived_value, "date_range_raw": range_raw}
+    evidence = {
+        "choice": choice_value, "date_range_derived": derived_value, "date_range_raw": range_raw,
+        "date_range_derive_reason": derive_reason,
+    }
 
     if choice_status == "out_of_frame":
         return "REVIEW", "Area pilihan tenor berada di luar cakupan foto", evidence
@@ -438,6 +465,37 @@ def _compute_all_checks(fields_table, raw_results, choice_groups, record):
     return checks, evidence
 
 
+def _extra_validation_notes(checks, tenor_evidence):
+    """Badge tambahan (V19f) yang menjelaskan ALASAN validasi spesifik --
+    dipakai BERSAMA oleh mode urban & rural, sama seperti _diagnostic_notes,
+    tapi bersumber dari checks/evidence (bukan fields_table) karena butuh
+    tahu field MANA yang bermasalah, bukan cuma indikator generik."""
+    notes = []
+
+    name_status, name_reason = checks.get("nama_nasabah", (None, None))
+    if name_status == "TOLAK":
+        notes.append("Name Mismatch")
+    elif name_status == "REVIEW" and name_reason and "variasi OCR" in name_reason:
+        notes.append("Name Uncertain")
+
+    tenor_status, tenor_reason = checks.get("tenor_penempatan", (None, None))
+    if (tenor_evidence or {}).get("date_range_derive_reason") == "reversed_date_range":
+        notes.append("Invalid/Reversed Date Range")
+    if tenor_status == "TOLAK" and tenor_reason and "tidak konsisten" in tenor_reason:
+        notes.append("Tenor Conflict")
+
+    reward_status, reward_reason = checks.get("bentuk_reward", (None, None))
+    if reward_status == "REVIEW" and reward_reason and "tidak terbaca" in reward_reason:
+        notes.append("Reward Uncertain")
+
+    for sig_field in ("signature_nasabah", "signature_atasan"):
+        sig_status, _sig_reason = checks.get(sig_field, (None, None))
+        if sig_status == "TOLAK" and "Signature Absent" not in notes:
+            notes.append("Signature Absent")
+
+    return notes
+
+
 def _decide_from_checks(checks, decisive_fields):
     """Prioritas SAMA spt sebelumnya: ada TOLAK -> TOLAK (semua alasan TOLAK
     dikumpulkan); tidak ada TOLAK tapi ada REVIEW -> REVIEW; selain itu ->
@@ -460,12 +518,16 @@ def compute_decision_v9_2(fields_table, raw_results, choice_groups, record):
     (nama/nomor_rekening/nominal/tenor/reward)."""
     checks, evidence = _compute_all_checks(fields_table, raw_results, choice_groups, record)
     decision, reasons = _decide_from_checks(checks, DECISIVE_FIELDS_V9_2)
+    notes = _diagnostic_notes(fields_table)
+    for badge in _extra_validation_notes(checks, evidence.get("tenor_penempatan")):
+        if badge not in notes:
+            notes.append(badge)
     return {
         "decision": decision,
         "reasons": reasons,
         "checks": {k: v[0] for k, v in checks.items()},
         "evidence": evidence,
-        "notes": _diagnostic_notes(fields_table),
+        "notes": notes,
     }
 
 
@@ -488,6 +550,9 @@ def compute_decision_rural(fields_table, raw_results, choice_groups, record):
     for field_name, badge in RURAL_NOTE_FIELDS.items():
         status, _reason = checks.get(field_name, (None, None))
         if status == "TOLAK" and badge not in notes:
+            notes.append(badge)
+    for badge in _extra_validation_notes(checks, evidence.get("tenor_penempatan")):
+        if badge not in notes:
             notes.append(badge)
 
     return {

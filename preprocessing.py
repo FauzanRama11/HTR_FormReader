@@ -972,6 +972,112 @@ def _alignment_is_good(meta):
     )
 
 
+# ============================================================================
+# COARSE ORIENTATION CORRECTION (V19f) -- ditambahkan setelah kasus nyata
+# ditemukan (Reska Nurdianti, downloaded_documents/
+# 1NLnzLKXVlI-1lrn7WF0T1OgKWSYKHFkK): foto formulir diambil dgn tablet dalam
+# posisi LANDSCAPE penuh (dokumen portrait miring 90 derajat di dalam frame),
+# EXIF Orientation=0 (nilai TIDAK valid/tidak actionable, bukan salah satu
+# dari 8 nilai standar) sehingga tidak ada koreksi EXIF apa pun yang bisa
+# dipakai. align_to_template's affine/homography SENGAJA hanya mentoleransi
+# rotasi KECIL (skew, lihat AFFINE_MAX_ROTATION_DEG=8 derajat) -- ORB
+# matching-nya sendiri tidak dirancang menembus rotasi 90/180/270 derajat
+# PENUH, jadi alignment gagal total pada kasus ini, BUKAN karena affine/
+# homography kurang toleran (keputusan V9.1 itu tetap benar utk skew kecil,
+# TIDAK diubah di sini -- lihat align_to_template's docstring).
+#
+# Pendekatan (V19f REVISI -- lihat catatan di bawah): reuse align_to_template
+# YANG SUDAH ADA (TIDAK menambah algoritma deteksi orientasi baru/Hough/dsb),
+# tp kandidat rotasi yg DIBANDINGKAN ditentukan dulu dari ASPECT RATIO
+# (bukan langsung membandingkan skor ORB ke-4 rotasi sekaligus). HANYA
+# mencoba rotasi tambahan kalau percobaan 0 derajat (orientasi apa adanya)
+# belum "good" (_alignment_is_good) -- dokumen yang sudah portrait/lurus
+# (mayoritas kasus) TIDAK PERNAH kena overhead tambahan ini.
+#
+# CATATAN PENTING (jangan ulangi tanpa fix ini): percobaan pertama versi ini
+# langsung membandingkan skor _alignment_quality_score ke-4 rotasi (0/90/
+# 180/270) sekaligus -- GAGAL pd dokumen nyata (Reska Nurdianti): homography
+# `align_to_template` PADA ORIENTASI SALAH (0 derajat, padahal dokumen
+# sebenarnya miring 90 derajat) tetap menghasilkan status "warning" dgn
+# inlier_ratio (0.248) yg SEDIKIT LEBIH TINGGI drpd orientasi yg BENAR (90
+# derajat, inlier_ratio 0.237) -- homography cukup ekspresif utk "menyerap"
+# rotasi 90 derajat ke dalam transform-nya sendiri shg skornya TIDAK
+# reliable membedakan orientasi benar vs salah scr langsung. Diverifikasi
+# lgs: membandingkan HANYA dua kandidat yg aspect ratio-nya SUDAH cocok dgn
+# template (mis. 90 vs 270 kalau raw image landscape & template portrait)
+# jauh lebih diskriminatif (90 dpt status "warning", 270 "failed" tegas).
+# ============================================================================
+
+
+def _aspect_ratio_orientation_mismatch(template_shape, image_shape, tolerance=0.35):
+    """True kalau image_shape's aspect ratio (w/h) adalah KEBALIKAN dari
+    template_shape's (mis. template portrait, image landscape) -- sinyal
+    KASAR tp jauh lebih robust drpd skor ORB/homography utk membedakan
+    rotasi 90/270 derajat PENUH dari 0/180 (lihat catatan di atas). Dokumen
+    yang hampir persegi (rasio < 1+tolerance) tidak dicurigai sama sekali --
+    ambigu scr geometris, biarkan skor ORB yang memutuskan lewat jalur 180."""
+    th, tw = template_shape[:2]
+    ih, iw = image_shape[:2]
+    template_is_portrait = th >= tw
+    image_is_portrait = ih >= iw
+    if template_is_portrait == image_is_portrait:
+        return False
+    template_ratio = max(tw, th) / max(1, min(tw, th))
+    return template_ratio >= (1 + tolerance)
+
+
+def align_with_orientation_correction(template_img, raw_image):
+    """Return (aligned_img, H, meta, corrected_raw_image, rotation_deg).
+    `corrected_raw_image` adalah `raw_image` itu sendiri (rotation_deg=0)
+    kalau orientasi awal sudah oke/terbaik, atau versi ter-rotasi 90/180/270
+    derajat kalau salah satu dari itu terbukti jauh lebih baik -- dipakai
+    pemanggil (prepare_and_align) SEBAGAI PENGGANTI raw_image asli utk
+    langkah selanjutnya (enhance/rectify), supaya tidak mengoreksi orientasi
+    dua kali atau balik ke versi yang salah."""
+    aligned, H, meta = align_to_template(template_img, raw_image)
+    if _alignment_is_good(meta):
+        meta["orientation_correction_deg"] = 0
+        return aligned, H, meta, raw_image, 0
+
+    if _aspect_ratio_orientation_mismatch(template_img.shape, raw_image.shape):
+        # 0 derajat MUSTAHIL benar scr geometris di sini (aspect ratio
+        # terbalik dari template) -- skornya JANGAN dipakai sbg baseline
+        # pembanding sama sekali (itu justru penyebab kegagalan versi
+        # sebelumnya, lihat catatan panjang di atas: skor "0 derajat salah"
+        # bisa numerically MENGALAHKAN skor "90 derajat benar"). Pilih
+        # LANGSUNG yang terbaik di antara 90 vs 270 saja, satu sama lain.
+        best_aligned, best_H, best_meta = None, None, None
+        best_score, best_raw, best_deg = (-1, 0.0, 0), raw_image, 0
+        for deg, rotate_code in ((90, cv2.ROTATE_90_CLOCKWISE), (270, cv2.ROTATE_90_COUNTERCLOCKWISE)):
+            candidate_raw = cv2.rotate(raw_image, rotate_code)
+            cand_aligned, cand_H, cand_meta = align_to_template(template_img, candidate_raw)
+            score = _alignment_quality_score(cand_meta)
+            if score > best_score:
+                best_score = score
+                best_aligned, best_H, best_meta = cand_aligned, cand_H, cand_meta
+                best_raw, best_deg = candidate_raw, deg
+        if best_meta is not None and best_meta.get("status") != "failed":
+            best_meta["orientation_correction_deg"] = best_deg
+            return best_aligned, best_H, best_meta, best_raw, best_deg
+        # 90 & 270 sama-sama gagal total (no_valid_transform) -- fallback ke
+        # 0 derajat drpd tidak menghasilkan apa-apa.
+        meta["orientation_correction_deg"] = 0
+        return aligned, H, meta, raw_image, 0
+
+    # Aspect ratio SUDAH cocok dgn template -> 0 derajat MASIH mungkin benar
+    # (baseline yg valid di sini, beda dari kasus di atas), HANYA 180 yg
+    # masuk akal scr geometris sbg pembanding tambahan (90/270 SENGAJA tidak
+    # dicoba -- aspect ratio-nya sendiri sudah menyingkirkan kemungkinan itu).
+    candidate_raw = cv2.rotate(raw_image, cv2.ROTATE_180)
+    cand_aligned, cand_H, cand_meta = align_to_template(template_img, candidate_raw)
+    if _alignment_quality_score(cand_meta) > _alignment_quality_score(meta):
+        cand_meta["orientation_correction_deg"] = 180
+        return cand_aligned, cand_H, cand_meta, candidate_raw, 180
+
+    meta["orientation_correction_deg"] = 0
+    return aligned, H, meta, raw_image, 0
+
+
 def prepare_and_align(path, raw_image, template_img):
     """Satu pintu masuk utk 'siapkan input lalu align ke template', menjaga
     prinsip "jangan apa-apakan dokumen yang sudah bagus":
@@ -987,11 +1093,22 @@ def prepare_and_align(path, raw_image, template_img):
        (atau memperburuk), dokumen ASLI yang tetap dipakai, bukan versi
        ter-warp.
 
+    0 (sebelum langkah 1 di atas). Deteksi/koreksi orientasi KASAR (0/90/180/
+    270 derajat) -- lihat align_with_orientation_correction -- HANYA
+    dijalankan kalau percobaan alignment pada orientasi asli belum "good";
+    dokumen yang sudah portrait/lurus tidak kena overhead ini sama sekali.
+    Kalau salah satu rotasi kanonik terbukti jauh lebih baik, `raw_image`
+    yang dipakai utk SISA fungsi ini (termasuk enhance/rectify di langkah 2)
+    diganti ke versi ter-rotasi itu -- bukan orientasi asli yang salah.
+
     Return: (aligned_img, H, alignment_meta) -- alignment_meta memuat juga
-    "candidate" (raw / rectified / raw_preferred_over_rectified) dan
-    "input_preparation" (dict rectified/reason, kompatibel dgn field
-    prep_meta versi sebelumnya)."""
-    aligned_raw, H_raw, meta_raw = align_to_template(template_img, raw_image)
+    "candidate" (raw / rectified / raw_preferred_over_rectified),
+    "orientation_correction_deg" (0/90/180/270), dan "input_preparation"
+    (dict rectified/reason, kompatibel dgn field prep_meta versi
+    sebelumnya)."""
+    aligned_raw, H_raw, meta_raw, raw_image, orientation_deg = align_with_orientation_correction(
+        template_img, raw_image
+    )
 
     is_pdf = is_pdf_document(path)
     if is_pdf or not PHOTO_RECTIFY:

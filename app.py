@@ -192,7 +192,7 @@ def _ensure_template_roi_image():
     return _save_preview_image(img, cache_path.name)
 
 
-def _run_ocr_and_format(request_id, document_path, data_entry_record=None, engine="v18"):
+def _run_ocr_and_format(request_id, document_path, data_entry_record=None, engine="v18", cancel_event=None):
     """Jalankan extractor penuh untuk satu dokumen -> payload response siap kirim.
     PENTING: pemanggil WAJIB sudah men-set progress awal untuk request_id ini
     SEBELUM memanggil fungsi ini (mis. sebelum proses download dokumen yang
@@ -218,7 +218,8 @@ def _run_ocr_and_format(request_id, document_path, data_entry_record=None, engin
     # signature-nya) -- kebocoran data referensi scr struktural tidak
     # mungkin terjadi utk engine itu.
     result = extractors.run(
-        engine, str(document_path), progress_callback=progress_callback, reference_record=data_entry_record
+        engine, str(document_path), progress_callback=progress_callback, reference_record=data_entry_record,
+        cancel_event=cancel_event,
     )
 
     _set_progress(request_id, status="processing", step="save_debug", percent=98, message="Menyimpan gambar debug ROI")
@@ -249,13 +250,23 @@ def _run_ocr_and_format(request_id, document_path, data_entry_record=None, engin
         # Urban/Rural di data_entry_record (lihat comparison.compute_decision).
         decision_v9_2 = comparison.compute_decision(
             fields, result["raw_results"], result["choice_groups"], data_entry_record)
-        # V19 sec 6 -- record fallback source in notes (informational only,
-        # NEVER changes the OK/TOLAK/REVIEW decision itself -- comparison.py
-        # is not touched). Only noted when an ACTUAL fallback happened
-        # (engine="qwen3_vl" never falls back, so it never reaches here).
-        if fallback_source and fallback_source != "Qwen3-VL Hosted":
-            decision_v9_2 = dict(decision_v9_2)
-            decision_v9_2["notes"] = list(decision_v9_2.get("notes") or []) + [f"Engine Fallback: {fallback_source}"]
+        # V19f: SATU badge "Extractor: <label>" per record (dari
+        # extractors.ENGINE_LABELS -- SATU-SATUNYA sumber label, tidak ada
+        # mapping baru di sini/frontend), menggantikan note lama "Engine
+        # Fallback: X" -- framing "fallback" salah utk qwen3_vl_local
+        # (bukan tahap fallback pipeline v18, itu MEMANG extractor yang
+        # dipilih utk seluruh record). "ROI Bermasalah"/"OCR Kurang Yakin"/
+        # "Fallback OCR Digunakan" (_diagnostic_notes) HANYA relevan utk
+        # pipeline OCR/ROI v18 -- disembunyikan utk engine lain supaya tidak
+        # menyesatkan (mis. status "review" dari VLM disalahartikan sbg
+        # "ROI Bermasalah").
+        decision_v9_2 = dict(decision_v9_2)
+        notes = list(decision_v9_2.get("notes") or [])
+        if engine != "v18":
+            notes = [n for n in notes if n not in
+                     ("ROI Bermasalah", "OCR Kurang Yakin", "Fallback OCR Digunakan")]
+        notes.append(f"Extractor: {extractors.ENGINE_LABELS.get(engine, engine)}")
+        decision_v9_2["notes"] = notes
     # final_status: dipakai sbg fallback utk Tab 1 (upload manual tanpa
     # pembanding), tetap dihitung selalu.
     final_status = comparison.compute_final_status(fields)
@@ -387,6 +398,12 @@ def _new_session(records):
             "errors": {},
             "final_status": {},
             "cancel_requested": False,  # V15: lihat /api/sheet/cancel + _process_batch
+            # V19f: threading.Event, TERPISAH dari cancel_requested (bool) --
+            # cancel_requested dicek HANYA di antar-record (_process_batch),
+            # cancel_event diteruskan ke pipeline.run_pipeline/extractors.run
+            # supaya record yang SEDANG berjalan bisa diinterupsi di antara
+            # tahap-tahap mahal (lihat _process_one_record/cancel_sheet_batch).
+            "cancel_event": threading.Event(),
             "engine": None,  # V19 -- di-set saat /api/sheet/submit, SATU extractor utk seluruh batch
         }
     return session_id
@@ -439,7 +456,8 @@ def _process_one_record(session_id, record):
             return
 
         result = _run_ocr_and_format(
-            request_id, document_path, data_entry_record=record, engine=session.get("engine") or "v18"
+            request_id, document_path, data_entry_record=record, engine=session.get("engine") or "v18",
+            cancel_event=session.get("cancel_event"),
         )
         # V15.2: preview_url dulu di-load+simpan TERPISAH (`_preview.jpg`) di
         # sini, SEBELUM _run_ocr_and_format -- duplikat kerja krn pipeline.
@@ -452,6 +470,13 @@ def _process_one_record(session_id, record):
         session["results"][record_no] = result
         session["status"][record_no] = "done"
         session["final_status"][record_no] = result.get("final_status") or "PASSED"
+    except pipeline.PipelineCancelled:
+        # V19f: interupsi di TENGAH record (bukan error) -- lihat
+        # cancel_sheet_batch/_new_session's cancel_event. TIDAK dicatat ke
+        # session["errors"] (bukan kegagalan), progress ditandai final di sini
+        # supaya polling frontend berhenti menunggu record ini.
+        session["status"][record_no] = "cancelled"
+        _set_progress(request_id, status="cancelled", step="cancelled", percent=0, message="Dibatalkan")
     except Exception as exc:
         traceback.print_exc()  # detail lengkap cukup di log server, TIDAK dikirim ke client
         detail = sanitize_error(exc)
@@ -465,10 +490,11 @@ def _process_batch(session_id, indices):
     session = _SESSIONS[session_id]
     records_by_no = {r["Record"]: r for r in session["records"]}
     for record_no in indices:
-        # V15: cek SEBELUM memulai record berikutnya -- record yg SUDAH
-        # berjalan (dipanggil di iterasi sebelumnya) selalu selesai wajar,
-        # TIDAK diinterupsi di tengah proses. Hanya record yg BELUM dimulai
-        # yang dibatalkan (lihat /api/sheet/cancel).
+        # Cek SEBELUM memulai record berikutnya -- record yg BELUM dimulai
+        # dibatalkan di sini. Record yg SUDAH berjalan (dipanggil di iterasi
+        # sebelumnya) diinterupsi SENDIRI oleh cancel_event di dalam
+        # _process_one_record/extractors.run/pipeline.run_pipeline (V19f --
+        # lihat /api/sheet/cancel), TIDAK menunggu sampai selesai wajar lagi.
         if session.get("cancel_requested"):
             for remaining_no in indices[indices.index(record_no):]:
                 if session["status"].get(remaining_no) == "queued":
@@ -479,6 +505,9 @@ def _process_batch(session_id, indices):
             continue
         _process_one_record(session_id, record)  # error 1 record tidak menghentikan loop
     session["cancel_requested"] = False  # reset -- batch ini selesai (habis atau dibatalkan)
+    cancel_event = session.get("cancel_event")
+    if cancel_event is not None:
+        cancel_event.clear()  # V19f: reset supaya submit berikutnya tidak langsung ter-cancel
 
 
 @app.post("/api/sheet/submit/{session_id}")
@@ -502,6 +531,9 @@ def submit_sheet_batch(session_id: str, payload: SheetSubmitPayload):
 
     session["engine"] = payload.engine
     session["cancel_requested"] = False  # run baru -- pastikan tidak langsung kebawa cancel dari run sebelumnya
+    cancel_event = session.get("cancel_event")
+    if cancel_event is not None:
+        cancel_event.clear()  # V19f: run baru -- pastikan tidak langsung kebawa cancel_event dari run sebelumnya
     for record_no in indices:
         session["status"][record_no] = "queued"
         session["final_status"].pop(record_no, None)  # rerun -> hapus final_status lama
@@ -512,13 +544,18 @@ def submit_sheet_batch(session_id: str, payload: SheetSubmitPayload):
 
 @app.post("/api/sheet/cancel/{session_id}")
 def cancel_sheet_batch(session_id: str):
-    """Hentikan record yang MASIH queued (belum mulai diproses) pada batch
-    yang sedang berjalan. Record yang sudah mulai diproses tetap diselesaikan
-    -- lihat _process_batch. Hasil yang sudah selesai TETAP tersimpan."""
+    """Hentikan SEGERA: record yang MASIH queued (belum mulai diproses) DAN
+    record yang SEDANG berjalan saat ini (V19f -- lihat cancel_event, dicek
+    di pipeline.run_pipeline/extractors.py's engine functions di antara
+    tahap-tahap mahal, TIDAK menunggu record itu selesai wajar). Hasil yang
+    sudah selesai TETAP tersimpan."""
     session = _SESSIONS.get(session_id)
     if session is None:
         return JSONResponse(status_code=404, content={"error": "Sesi spreadsheet tidak ditemukan. Muat ulang."})
     session["cancel_requested"] = True
+    cancel_event = session.get("cancel_event")
+    if cancel_event is not None:
+        cancel_event.set()
     return {"session_id": session_id, "cancel_requested": True}
 
 

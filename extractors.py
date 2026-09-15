@@ -51,6 +51,7 @@ Design (see handover.md for the full writeup):
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -182,6 +183,18 @@ def _classify_api_exception(exc):
 # ============================================================================
 
 
+def _check_cancel(cancel_event, step):
+    """V19f: checked at each API-engine function's existing prepare/extract/
+    validate checkpoints (see run_gemini/run_qwen3_vl_hosted/
+    run_qwen3_vl_local) -- same PipelineCancelled signal pipeline.run_pipeline
+    raises (via its `emit` closure) at its own 14 checkpoints, so app.py has
+    ONE exception type to catch regardless of engine. Can't abort an
+    in-flight network/GPU call itself, but stops immediately after it
+    returns instead of continuing to validate/adapt/save."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise pipeline.PipelineCancelled(f"Dibatalkan pada tahap '{step}'")
+
+
 def _progress(callback, step, percent, message):
     """Mirrors pipeline._emit_progress()'s exact behavior (clamp 0-100, never
     let a callback exception break the extractor) so app.py's existing
@@ -192,6 +205,45 @@ def _progress(callback, step, percent, message):
         callback({"step": step, "percent": int(max(0, min(100, percent))), "message": message})
     except Exception:
         pass
+
+
+class _ProgressHeartbeat:
+    """V19f: background ticker that nudges progress_callback's MESSAGE (never
+    percent -- real execution stages already set percent, this never fakes
+    one) every `interval` seconds while a single long call is in flight (a
+    hosted/local Qwen or Gemini inference request, which today sits under
+    one frozen checkpoint for its whole duration -- ~22-26s for local Qwen,
+    longer once a conditional reward-detail follow-up call also fires).
+    Reuses the SAME progress_callback plumbing already threaded through
+    every layer -- no new state, no new endpoint. A callback exception (or
+    callback=None) is swallowed the same way `_progress()` already does."""
+
+    def __init__(self, callback, step, percent, label, interval=2.5):
+        self._callback = callback
+        self._step = step
+        self._percent = percent
+        self._label = label
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _run(self):
+        start = time.monotonic()
+        while not self._stop.wait(self._interval):
+            elapsed = int(time.monotonic() - start)
+            _progress(self._callback, self._step, self._percent, f"{self._label} ({elapsed} dtk)")
+
+    def __enter__(self):
+        if self._callback is not None:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        return False
 
 
 def _read_file_for_upload(document_path):
@@ -276,10 +328,13 @@ def adapt_common_to_pipeline_shape(common, source, document_path):
         filled" check has a witness instead of reporting a false REVIEW.
         This is STILL true for Gemini/Mistral -- a known, deliberate
         simplification, flagged here and in handover.md. For Qwen
-        specifically, `common` MAY additionally carry an OPTIONAL
-        `reward_non_tunai_detail` key (see extractors._adapt_qwen_to_common)
-        with the customer's actual handwritten item description; when
-        present and non-empty, THAT real text is used instead of the
+        specifically, `common` MAY additionally carry OPTIONAL
+        `reward_non_tunai_detail`/`reward_tunai_detail` keys (see
+        extractors._adapt_qwen_to_common, sourced from vlm.py's conditional
+        reward-detail follow-up calls -- see the section comments above
+        vlm.REWARD_DETAIL_PROMPT/REWARD_TUNAI_DETAIL_PROMPT) with the
+        customer's actual handwritten item description / cash amount; when
+        present and non-empty, THAT real value is used instead of the
         mirrored placeholder -- checked below via `_field_entry`, which
         harmlessly returns nothing for Gemini/Mistral's `common` (no such
         key), so their behavior is completely unchanged."""
@@ -325,17 +380,21 @@ def adapt_common_to_pipeline_shape(common, source, document_path):
 
     reward, _reward_status, reward_conf = _field_entry(common, "bentuk_reward")
     reward = reward if reward in ("tunai", "non_tunai") else None
-    # reward_non_tunai_detail: OPTIONAL key, only present when the caller is
-    # Qwen (extractors._adapt_qwen_to_common) -- absent for Gemini/Mistral,
-    # whose schema has no separate detail field, so _field_entry harmlessly
-    # returns (None, "not_detected", None) for them and behavior below is
-    # UNCHANGED (falls straight to the mirrored-placeholder branch, same as
-    # before this field existed).
+    # reward_non_tunai_detail/reward_tunai_detail: OPTIONAL keys, only
+    # present when the caller is Qwen (extractors._adapt_qwen_to_common) --
+    # absent for Gemini/Mistral, whose schema has no separate detail field,
+    # so _field_entry harmlessly returns (None, "not_detected", None) for
+    # them and behavior below is UNCHANGED (falls straight to the
+    # mirrored-placeholder branch, same as before these fields existed).
     reward_detail, _detail_status, _detail_conf = _field_entry(common, "reward_non_tunai_detail")
+    reward_tunai_detail, _tunai_detail_status, _tunai_detail_conf = _field_entry(common, "reward_tunai_detail")
     non_tunai_value = reward_detail if (reward == "non_tunai" and reward_detail) else (
         reward if reward == "non_tunai" else None
     )
-    put("reward_tunai", (reward if reward == "tunai" else None),
+    tunai_value = reward_tunai_detail if (reward == "tunai" and reward_tunai_detail) else (
+        reward if reward == "tunai" else None
+    )
+    put("reward_tunai", tunai_value,
         "detected" if reward == "tunai" else "not_detected")
     put("reward_non_tunai", non_tunai_value,
         "detected" if reward == "non_tunai" else "not_detected")
@@ -386,14 +445,15 @@ def adapt_common_to_pipeline_shape(common, source, document_path):
 # ============================================================================
 
 
-def run_v18(document_path, progress_callback=None, reference_record=None):
+def run_v18(document_path, progress_callback=None, reference_record=None, cancel_event=None):
     """reference_record IS forwarded here (unlike run_gemini) because
     pipeline.run_pipeline() already uses it internally in an existing,
     previously-audited way (_run_vlm_reference_check, predates this
     session) -- unrelated to Gemini's no-reference-leakage guarantee, which
     is about NOT giving ground truth to an external API."""
     result = pipeline.run_pipeline(
-        str(document_path), progress_callback=progress_callback, reference_record=reference_record
+        str(document_path), progress_callback=progress_callback, reference_record=reference_record,
+        cancel_event=cancel_event,
     )
     result.setdefault("ocr_meta", {})["engine"] = "v18"
     return result
@@ -415,8 +475,9 @@ def _compute_gemini_cost(model, input_tokens, output_tokens, thinking_tokens):
     return cost_usd, cost_usd * config.USD_IDR_RATE
 
 
-def run_gemini(document_path, model, progress_callback=None):
+def run_gemini(document_path, model, progress_callback=None, cancel_event=None):
     _progress(progress_callback, "prepare", 10, "Preparing document")
+    _check_cancel(cancel_event, "prepare")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ExtractorError("GEMINI_API_KEY environment variable is not set", stage="API_AUTH")
@@ -431,7 +492,9 @@ def run_gemini(document_path, model, progress_callback=None):
 
     raw_bytes, mime_type = _read_file_for_upload(document_path)
 
-    _progress(progress_callback, "extract", 35, f"Extracting with {ENGINE_LABELS.get(model, model)}")
+    extract_label = f"Extracting with {ENGINE_LABELS.get(model, model)}"
+    _progress(progress_callback, "extract", 35, extract_label)
+    heartbeat = _ProgressHeartbeat(progress_callback, "extract", 35, extract_label)
     client = genai.Client(api_key=api_key)
     # `response_schema` is validated as `google.genai.types.Schema`, an
     # OpenAPI-style Pydantic model whose `type` field is a SINGLE strict enum
@@ -453,25 +516,27 @@ def run_gemini(document_path, model, progress_callback=None):
     # method signatures can change between releases.
     response = None
     last_exc = None
-    for attempt in range(2):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=[
-                    types.Part.from_bytes(data=raw_bytes, mime_type=mime_type),
-                    EXTRACTION_INSTRUCTION,
-                ],
-                config={"response_mime_type": "application/json", "response_json_schema": schema},
-            )
-            break
-        except Exception as exc:
-            last_exc = exc
-            stage = _classify_api_exception(exc)
-            if stage != "API_TIMEOUT" or attempt == 1:
-                raise ExtractorError(str(exc), stage=stage) from exc
-            time.sleep(1.5)  # bounded retry, ONLY for transient transport errors
+    with heartbeat:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[
+                        types.Part.from_bytes(data=raw_bytes, mime_type=mime_type),
+                        EXTRACTION_INSTRUCTION,
+                    ],
+                    config={"response_mime_type": "application/json", "response_json_schema": schema},
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                stage = _classify_api_exception(exc)
+                if stage != "API_TIMEOUT" or attempt == 1:
+                    raise ExtractorError(str(exc), stage=stage) from exc
+                time.sleep(1.5)  # bounded retry, ONLY for transient transport errors
     if response is None:
         raise ExtractorError(str(last_exc), stage="API_TIMEOUT")
+    _check_cancel(cancel_event, "extract")
 
     _progress(progress_callback, "validate", 70, "Validating extraction")
     try:
@@ -516,12 +581,17 @@ def run_gemini(document_path, model, progress_callback=None):
 # fans out to Gemini/Mistral either.
 # ============================================================================
 
-QWEN_UNCERTAIN_CONFIDENCE = 0.5  # Qwen's OWN self-reported confidence below
-                                  # this -> status "uncertain" (an EXISTING
-                                  # comparison.py status, see
-                                  # UNCERTAIN_FIELD_STATUSES) -- not a new
-                                  # validation rule, just how low self-
-                                  # reported confidence is surfaced.
+def _qwen_self_assessment(qwen_result):
+    """Per-field self-assessment straight from Qwen's own response, for
+    ocr_meta logging/debugging -- status (detected/uncertain/not_detected)
+    for the text/date/choice fields, confidence (0.0-1.0) for the two
+    signature fields, matching vlm._parse_direct_semantic_json's contract
+    exactly (see that function's docstring for why the two differ)."""
+    out = {}
+    for f in vlm.DIRECT_SEMANTIC_FIELDS:
+        item = qwen_result.get(f) or {}
+        out[f] = item.get("confidence") if f in ("signature_nasabah", "signature_bri") else item.get("status")
+    return out
 
 
 def _qwen_prepare_image(document_path):
@@ -534,47 +604,94 @@ def _qwen_prepare_image(document_path):
     HOSTED_MAX_SIDE_FULL cap at inference time, see vlm.py). Deliberately
     NOT doing: deskew,
     threshold, binarize, ROI crop, label detection first, PaddleOCR first --
-    the model inspects the WHOLE, un-cropped document."""
+    the model inspects the WHOLE, un-cropped document.
+
+    V19f: exif_transpose is a no-op whenever the camera/device wrote no EXIF
+    Orientation tag, or an invalid one (real case: a HUAWEI MatePad photo
+    with Orientation=0 -- not one of the 8 standard EXIF codes -- see
+    downloaded_documents/1NLnzLKXVlI-1lrn7WF0T1OgKWSYKHFkK, "Reska
+    Nurdianti"), leaving a genuinely sideways-captured document sideways for
+    the model to read. Since this engine deliberately sends the WHOLE
+    uncropped document (no ROI/perspective warp, per the docstring above),
+    fixing this needs coarse whole-image rotation, not a full template
+    alignment -- reuses preprocessing.align_with_orientation_correction
+    SOLELY to pick the best 0/90/180/270 rotation (via the same ORB-vs-
+    template scoring used for the v18 pipeline), discarding the
+    warped/aligned candidate it also computes -- that result is a no-op
+    (same image back) whenever the document is already upright, so this
+    costs nothing extra for the common case."""
     if prep.is_pdf_document(document_path):
         return prep.load_document(str(document_path))
     import numpy as np
     from PIL import Image, ImageOps
     pil_img = ImageOps.exif_transpose(Image.open(str(document_path))).convert("RGB")
-    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    image_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    try:
+        template_img = vlm._get_template_image()
+        _, _, _, image_bgr, _ = prep.align_with_orientation_correction(template_img, image_bgr)
+    except Exception:
+        pass  # best-effort -- never let orientation detection break extraction
+    return image_bgr
+
+
+# V19f: DIRECT_SEMANTIC_PROMPT's signature fields already return a genuine
+# 0.0-1.0 self-rated confidence (vlm._parse_direct_semantic_json) -- this
+# threshold recovers a real "uncertain" 3rd state from it instead of
+# collapsing straight to present/absent (see _signature_state below). Real
+# eval evidence (eval_runs/evaluation_summary_qwen_local_v2_fixed.json):
+# BEFORE this fix, signature status was 100% present / 0% uncertain across
+# all 10 real documents -- tunable, not a measured-optimal value.
+SIGNATURE_CONFIDENCE_UNCERTAIN_THRESHOLD = 0.6
+
+
+def _signature_state(sig, threshold=SIGNATURE_CONFIDENCE_UNCERTAIN_THRESHOLD):
+    """present/absent/uncertain from a DIRECT_SEMANTIC signature field's
+    {value, confidence}. A low self-rated confidence -- regardless of which
+    way the boolean `value` leans -- means the model itself wasn't sure the
+    ink was a real signature (vs. a print artifact/faint mark), so it's
+    reported as uncertain rather than trusted as a firm present/absent."""
+    conf = sig.get("confidence")
+    if conf is not None and conf < threshold:
+        return "uncertain"
+    return "present" if sig.get("value") else "absent"
 
 
 def _adapt_qwen_to_common(qwen_result):
-    """Map vlm.DIRECT_SEMANTIC_FIELDS (nama/nomor_rekening/nominal_penempatan/
-    tenor_penempatan/tanggal_mulai/tanggal_selesai/bentuk_reward/
-    reward_non_tunai_detail/signature_nasabah/signature_bri, each {value,
-    confidence}) onto the COMMON_FIELDS canonical schema shared with Gemini/
-    Mistral, so adapt_common_to_pipeline_shape() is reused UNCHANGED.
+    """Map vlm.DIRECT_SEMANTIC_FIELDS (nama/nomor_rekening/unit_kerja/
+    nominal_penempatan/tenor_penempatan/tanggal_mulai/tanggal_selesai/
+    bentuk_reward/reward_non_tunai_detail/signature_nasabah/signature_bri)
+    onto the COMMON_FIELDS canonical schema shared with Gemini/Mistral, so
+    adapt_common_to_pipeline_shape() is reused UNCHANGED.
 
-    tanggal_mulai/tanggal_selesai and reward_non_tunai_detail were added
-    specifically so Qwen's tenor/reward evidence stops being permanently
+    tanggal_mulai/tanggal_selesai, unit_kerja and reward_non_tunai_detail
+    were added specifically so Qwen's evidence stops being permanently
     incomplete relative to Gemini/Mistral (see adapt_common_to_pipeline_
     shape's docstring for the shared tenor/reward reuse design -- this
     function now feeds it real data instead of hardcoded nulls/placeholders).
-    unit_kerja_pengelola_rekening remains not_detected/null -- genuinely not
-    part of the Qwen prompt's requested fields, unrelated to this fix."""
-    def wrap(value, confidence):
-        confidence = confidence or 0.0
-        if value in (None, ""):
-            status = "not_detected"
-        elif confidence < QWEN_UNCERTAIN_CONFIDENCE:
-            status = "uncertain"
-        else:
-            status = "detected"
-        return {"value": value, "status": status, "confidence": confidence}
+
+    Every non-signature field in vlm.DIRECT_SEMANTIC_FIELDS now reports its
+    own detected/uncertain/not_detected status directly (see vlm._parse_
+    direct_semantic_json) instead of a raw 0.0-1.0 confidence that used to
+    be thresholded here -- wrap() below just passes it through, falling
+    back to _field_entry's own defensive derive-from-value rule (same as
+    extractors._field_entry) for the one field that has no status of its
+    own (reward_non_tunai_detail, sourced from a separate follow-up call,
+    see vlm._extract_reward_detail_hosted)."""
+    def wrap(value, status=None):
+        if status not in ("detected", "uncertain", "not_detected"):
+            status = "not_detected" if value in (None, "") else "detected"
+        return {"value": value, "status": status, "confidence": None}
 
     nama = qwen_result.get("nama") or {}
     rekening = qwen_result.get("nomor_rekening") or {}
+    unit = qwen_result.get("unit_kerja") or {}
     nominal = qwen_result.get("nominal_penempatan") or {}
     tenor = qwen_result.get("tenor_penempatan") or {}
     tanggal_mulai = qwen_result.get("tanggal_mulai") or {}
     tanggal_selesai = qwen_result.get("tanggal_selesai") or {}
     reward = qwen_result.get("bentuk_reward") or {}
     reward_detail = qwen_result.get("reward_non_tunai_detail") or {}
+    reward_tunai_detail = qwen_result.get("reward_tunai_detail") or {}
     sig_nasabah = qwen_result.get("signature_nasabah") or {}
     sig_bri = qwen_result.get("signature_bri") or {}
 
@@ -591,21 +708,22 @@ def _adapt_qwen_to_common(qwen_result):
     rekening_value = str(rekening_value) if rekening_value not in (None, "") else None
 
     return {
-        "nama_nasabah": wrap(nama.get("value"), nama.get("confidence")),
-        "nomor_rekening": wrap(rekening_value, rekening.get("confidence")),
-        "unit_kerja_pengelola_rekening": {"value": None, "status": "not_detected", "confidence": 0.0},
-        "nominal_penempatan": wrap(nominal.get("value"), nominal.get("confidence")),
-        "tenor_penempatan": wrap(tenor_value, tenor.get("confidence")),
-        "tanggal_mulai": wrap(tanggal_mulai.get("value"), tanggal_mulai.get("confidence")),
-        "tanggal_selesai": wrap(tanggal_selesai.get("value"), tanggal_selesai.get("confidence")),
-        "bentuk_reward": wrap(reward_value, reward.get("confidence")),
-        "reward_non_tunai_detail": wrap(reward_detail.get("value"), reward_detail.get("confidence")),
-        "signature_nasabah": "present" if sig_nasabah.get("value") else "absent",
-        "signature_atasan": "present" if sig_bri.get("value") else "absent",
+        "nama_nasabah": wrap(nama.get("value"), nama.get("status")),
+        "nomor_rekening": wrap(rekening_value, rekening.get("status")),
+        "unit_kerja_pengelola_rekening": wrap(unit.get("value"), unit.get("status")),
+        "nominal_penempatan": wrap(nominal.get("value"), nominal.get("status")),
+        "tenor_penempatan": wrap(tenor_value, tenor.get("status")),
+        "tanggal_mulai": wrap(tanggal_mulai.get("value"), tanggal_mulai.get("status")),
+        "tanggal_selesai": wrap(tanggal_selesai.get("value"), tanggal_selesai.get("status")),
+        "bentuk_reward": wrap(reward_value, reward.get("status")),
+        "reward_non_tunai_detail": wrap(reward_detail.get("value")),
+        "reward_tunai_detail": wrap(reward_tunai_detail.get("value")),
+        "signature_nasabah": _signature_state(sig_nasabah),
+        "signature_atasan": _signature_state(sig_bri),
     }
 
 
-def run_qwen3_vl_hosted(document_path, progress_callback=None):
+def run_qwen3_vl_hosted(document_path, progress_callback=None, cancel_event=None):
     """Hugging Face HOSTED Qwen3-VL-2B-Instruct test (engine id "qwen3_vl").
     No `reference_record` parameter -- same no-leakage guarantee as
     run_gemini (vlm.extract_direct_semantic_hosted's signature doesn't
@@ -614,6 +732,7 @@ def run_qwen3_vl_hosted(document_path, progress_callback=None):
     response) propagates as an ExtractorError with the REAL underlying
     message, per this test's explicit "no silent fallback" requirement."""
     _progress(progress_callback, "prepare", 10, "Preparing document (minimal, no ROI)")
+    _check_cancel(cancel_event, "prepare")
     image_bgr = _qwen_prepare_image(document_path)
 
     model = os.getenv("QWEN_MODEL", config.QWEN_MODEL_DEFAULT).strip()
@@ -622,7 +741,8 @@ def run_qwen3_vl_hosted(document_path, progress_callback=None):
         raise ExtractorError("HF_TOKEN environment variable is not set", stage="API_AUTH")
     timeout = int(os.getenv("HF_REQUEST_TIMEOUT_S", str(config.HF_REQUEST_TIMEOUT_S)))
 
-    _progress(progress_callback, "extract", 35, f"Extracting with {ENGINE_LABELS.get('qwen3_vl')}")
+    extract_label = f"Extracting with {ENGINE_LABELS.get('qwen3_vl')}"
+    _progress(progress_callback, "extract", 35, extract_label)
     try:
         # Multi-call LENIENT-vote wrapper, not the plain single-call
         # function -- the two signature fields (and only those two) were
@@ -631,20 +751,20 @@ def run_qwen3_vl_hosted(document_path, progress_callback=None):
         # (handover.md); checking 3x and treating ANY "present" as present
         # (explicit user policy: absence should be the harder conclusion)
         # mitigates that. Costs 3x the API calls of a single extraction.
-        qwen_result, raw_text, request_meta = vlm.extract_direct_semantic_hosted_majority(
-            image_bgr, model=model, hf_token=hf_token, timeout=timeout,
-        )
+        with _ProgressHeartbeat(progress_callback, "extract", 35, extract_label):
+            qwen_result, raw_text, request_meta = vlm.extract_direct_semantic_hosted_majority(
+                image_bgr, model=model, hf_token=hf_token, timeout=timeout,
+            )
     except vlm.HostedInferenceError as exc:
         raise ExtractorError(str(exc), stage=_classify_api_exception(exc)) from exc
+    _check_cancel(cancel_event, "extract")
 
     _progress(progress_callback, "validate", 70, "Validating extraction")
     common = _adapt_qwen_to_common(qwen_result)
     result = adapt_common_to_pipeline_shape(common, source="qwen3_vl", document_path=document_path)
     result["ocr_meta"]["strategy"] = "qwen3_vl_hosted_direct_semantic"
     result["ocr_meta"]["fallback_source"] = "Qwen3-VL Hosted"
-    result["ocr_meta"]["qwen_confidence"] = {
-        f: (qwen_result.get(f) or {}).get("confidence") for f in vlm.DIRECT_SEMANTIC_FIELDS
-    }
+    result["ocr_meta"]["qwen_confidence"] = _qwen_self_assessment(qwen_result)
     # Task requirement: log model/request status/processing time/raw
     # response/parsed JSON. vlm.extract_direct_semantic_hosted already prints
     # these to stdout; also surfaced here via ocr_meta (returned verbatim by
@@ -655,45 +775,53 @@ def run_qwen3_vl_hosted(document_path, progress_callback=None):
     return result
 
 
-def run_qwen3_vl_local(document_path, progress_callback=None):
-    """LOCAL Qwen3-VL-2B-Instruct test (engine id "qwen3_vl_local"), separate
-    from and additive to the hosted "qwen3_vl" engine above -- neither the
+def run_qwen3_vl_local(document_path, progress_callback=None, cancel_event=None):
+    """LOCAL Qwen model test (default models/Qwen3-VL-4B-Instruct, see
+    vlm.VLM_MODEL_PATH env var; engine id "qwen3_vl_local"), separate from
+    and additive to the hosted "qwen3_vl" engine above -- neither the
     hosted engine nor its default selection in the UI/CLI is touched by this
     one. Uses the SAME minimal image prep (_qwen_prepare_image) and adapter
     (_adapt_qwen_to_common/adapt_common_to_pipeline_shape) as the hosted
     path, but runs entirely on-device via vlm.extract_direct_semantic_local
-    (no network, no HF_TOKEN needed). No majority-vote (that mitigates HF
-    hosted non-determinism specifically; repeating a 5+ minute local call 3x
-    isn't a worthwhile trade). Deliberately does NOT fall back to run_v18 on
-    failure, same "no silent fallback" policy as the hosted engine -- model
-    load errors (missing local weights/dependencies) or CUDA OOM propagate
-    as a real ExtractorError.
+    (no network, no HF_TOKEN needed). No majority-vote: unlike the hosted
+    engine, local greedy decoding (do_sample=False) is fully deterministic
+    -- confirmed by direct test, repeated calls on the same image return
+    byte-identical output -- so voting would just repeat the same answer N
+    times for no benefit, not merely "not worth the latency" as originally
+    assumed here. Deliberately does NOT fall back to run_v18 on failure,
+    same "no silent fallback" policy as the hosted engine -- model load
+    errors (missing local weights/dependencies) or CUDA OOM propagate as a
+    real ExtractorError.
 
-    Measured, honest limitation (see handover.md and vlm.py's module
-    comment above extract_direct_semantic_local): on a 2GB-VRAM GPU this
-    produced ~0% accuracy on name/account number across a real 9-document
-    run -- the forced-low MAX_SIDE_FULL needed to avoid OOM is too low-
-    resolution for the model to actually read handwriting. Kept available
-    for machines with more VRAM, or future re-evaluation, not because it is
-    currently a usable substitute for the hosted engine."""
+    Re-verified on real hardware (RTX 4060 Laptop, 8.6GB VRAM), see
+    vlm.py's module comment above extract_direct_semantic_local for the
+    full measurement: ~22-26s/document, correct field values on real
+    documents -- this supersedes an EARLIER finding here and in
+    handover.md ("~0% accuracy... on a 2GB-VRAM GPU"), which was measured
+    on different (much more constrained) hardware with a smaller 2B model
+    and does not describe this engine's behavior in general. Actual
+    accuracy/speed on whatever hardware this is deployed to should still be
+    re-measured there rather than assumed from either finding."""
     _progress(progress_callback, "prepare", 10, "Preparing document (minimal, no ROI)")
+    _check_cancel(cancel_event, "prepare")
     image_bgr = _qwen_prepare_image(document_path)
 
-    _progress(progress_callback, "extract", 35, f"Extracting with {ENGINE_LABELS.get('qwen3_vl_local')} (this can take several minutes)")
+    extract_label = f"Extracting with {ENGINE_LABELS.get('qwen3_vl_local')}"
+    _progress(progress_callback, "extract", 35, extract_label)
     try:
-        qwen_result, raw_text = vlm.extract_direct_semantic_local(image_bgr)
+        with _ProgressHeartbeat(progress_callback, "extract", 35, extract_label):
+            qwen_result, raw_text = vlm.extract_direct_semantic_local(image_bgr)
     except Exception as exc:
         raise ExtractorError(f"Local Qwen3-VL inference failed ({type(exc).__name__}): {exc}",
                               stage=_classify_api_exception(exc)) from exc
+    _check_cancel(cancel_event, "extract")
 
     _progress(progress_callback, "validate", 70, "Validating extraction")
     common = _adapt_qwen_to_common(qwen_result)
     result = adapt_common_to_pipeline_shape(common, source="qwen3_vl_local", document_path=document_path)
     result["ocr_meta"]["strategy"] = "qwen3_vl_local_direct_semantic"
     result["ocr_meta"]["fallback_source"] = "Qwen3-VL Local"
-    result["ocr_meta"]["qwen_confidence"] = {
-        f: (qwen_result.get(f) or {}).get("confidence") for f in vlm.DIRECT_SEMANTIC_FIELDS
-    }
+    result["ocr_meta"]["qwen_confidence"] = _qwen_self_assessment(qwen_result)
     result["ocr_meta"]["qwen_raw_response"] = raw_text
     _progress(progress_callback, "done", 100, "Complete")
     return result
@@ -713,17 +841,26 @@ ENGINE_LABELS = {
 ENGINES = tuple(ENGINE_LABELS)
 
 
-def run(engine, document_path, progress_callback=None, reference_record=None):
+def run(engine, document_path, progress_callback=None, reference_record=None, cancel_event=None):
     """SINGLE dispatch point -- exactly one branch executes per call, never a
-    fan-out to multiple engines, never an automatic fallback between them."""
+    fan-out to multiple engines, never an automatic fallback between them.
+
+    cancel_event (OPSIONAL, V19f): threading.Event forwarded to whichever
+    engine actually runs -- checked at that engine's own existing
+    prepare/extract/validate checkpoints (or, for run_v18,
+    pipeline.run_pipeline's 14 checkpoints). Raises pipeline.PipelineCancelled
+    when set; app.py catches it to mark the record "cancelled" instead of
+    "error"."""
     if engine == "v18":
-        result = run_v18(document_path, progress_callback=progress_callback, reference_record=reference_record)
+        result = run_v18(document_path, progress_callback=progress_callback, reference_record=reference_record,
+                          cancel_event=cancel_event)
     elif engine == "gemini-3.8-flash":
-        result = run_gemini(document_path, model="gemini-3.8-flash", progress_callback=progress_callback)
+        result = run_gemini(document_path, model="gemini-3.8-flash", progress_callback=progress_callback,
+                             cancel_event=cancel_event)
     elif engine == "qwen3_vl":
-        result = run_qwen3_vl_hosted(document_path, progress_callback=progress_callback)
+        result = run_qwen3_vl_hosted(document_path, progress_callback=progress_callback, cancel_event=cancel_event)
     elif engine == "qwen3_vl_local":
-        result = run_qwen3_vl_local(document_path, progress_callback=progress_callback)
+        result = run_qwen3_vl_local(document_path, progress_callback=progress_callback, cancel_event=cancel_event)
     else:
         raise InvalidExtractor(engine)
     # V19 sec 5 -- metadata.version stamp, same for every engine (comparison

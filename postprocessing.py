@@ -162,10 +162,19 @@ def normalize_text(value):
     return re.sub(r"\s+", " ", str(value)).strip() if value else None
 
 
+# Label yg kadang ikut ke-OCR bareng nilai nomor rekening (mis. ROI sedikit
+# melebar ke kiri) -- dibuang SEBELUM substitusi huruf->digit di bawah,
+# karena "No" sendiri mengandung "o" yg akan disubstitusi jadi "0" dan bocor
+# jadi leading zero palsu kalau urutannya dibalik (mis. "No Rek: 123" ->
+# tanpa strip ini jadi "N0" -> "0123", padahal seharusnya "123").
+_ACCOUNT_LABEL_PREFIX_RE = re.compile(r"(?i)^\s*no\.?\s*rek(?:ening)?\s*:?\s*")
+
+
 def normalize_numeric(value):
     if not value:
         return None
     text = str(value)
+    text = _ACCOUNT_LABEL_PREFIX_RE.sub("", text)
     for source, target in {"O": "0", "o": "0", "I": "1", "l": "1", "S": "5", "B": "8"}.items():
         text = text.replace(source, target)
     digits = re.sub(r"\D", "", text)
@@ -428,9 +437,18 @@ def process_choices(template_img, aligned_img, template_gray, aligned_gray, shap
 # tanggal -> status 'conflict'. Selalu menyimpan value/source/status/reason.
 # ============================================================================
 
+# V19f: tambah nama bulan SINGKATAN (Indonesia & Inggris) -- dokumen nyata
+# kadang ditulis "Sep 2026"/"Mar 2027", bukan cuma nama bulan lengkap.
 _ID_MONTHS = {
     "januari": 1, "februari": 2, "maret": 3, "april": 4, "mei": 5, "juni": 6,
     "juli": 7, "agustus": 8, "september": 9, "oktober": 10, "november": 11, "desember": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
+    "agu": 8, "ags": 8, "aug": 8, "sep": 9, "sept": 9, "okt": 10, "oct": 10,
+    "nov": 11, "des": 12, "dec": 12,
+    # "april"/"september"/"november" already spelled identically to Indonesian
+    # above -- only the genuinely different English full names need adding.
+    "january": 1, "february": 2, "march": 3, "may": 5, "june": 6,
+    "july": 7, "august": 8, "october": 10, "december": 12,
 }
 _DATE_TEXT_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})")
 _DATE_NUM_RE = re.compile(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})")
@@ -458,20 +476,35 @@ def _extract_dates(text):
 
 
 def _calendar_month_diff(d1, d2):
-    return abs((d2.year - d1.year) * 12 + (d2.month - d1.month))
+    """Selisih bulan KALENDER dari d1 ke d2. TIDAK pakai abs() (lihat V19f
+    fix di derive_tenor_from_range di bawah) -- caller SELALU memanggil ini
+    setelah memastikan d2 >= d1 (urutan kronologis valid), supaya rentang
+    terbalik tidak tersamar jadi angka positif seperti sebelumnya."""
+    return (d2.year - d1.year) * 12 + (d2.month - d1.month)
 
 
 def derive_tenor_from_range(raw_text):
     """Ekstrak DUA tanggal dari teks rentang_tenor, hitung selisih bulan
     KALENDER (year*12+month, bukan hari/30), lalu petakan ke opsi tenor
-    terdekat (1/3/6) dengan toleransi kecil. Return (value_atau_None, reason)."""
+    terdekat (1/3/6) dengan toleransi kecil. Return (value_atau_None, reason).
+
+    V19f: kalau tanggal kedua < tanggal pertama (rentang terbalik), TIDAK
+    PERNAH ditukar diam-diam -- bisa jadi urutan baca OCR/spasial yang salah,
+    bukan berarti mulai/selesai memang begitu. Dilaporkan sbg reason khusus
+    "reversed_date_range" (value None) supaya caller (comparison.validate_tenor,
+    resolve_tenor_source) menandainya REVIEW/uncertain, dan TIDAK PERNAH
+    menurunkan tenor dari rentang yang tidak valid ini."""
     if not raw_text:
         return None, "rentang_tenor_kosong"
     dates = _extract_dates(raw_text)
     if len(dates) < 2:
         return None, "tidak_bisa_ekstrak_2_tanggal_dari_rentang_tenor"
 
-    months = _calendar_month_diff(dates[0], dates[1])
+    d1, d2 = dates[0], dates[1]
+    if d2 < d1:
+        return None, "reversed_date_range"
+
+    months = _calendar_month_diff(d1, d2)
     if months <= 0:
         return None, "selisih_tanggal_tidak_valid"
 

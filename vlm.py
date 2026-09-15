@@ -452,7 +452,7 @@ def extract_fields_fullpage(aligned_img_bgr, spec_fields, max_new_tokens=None):
 # ============================================================================
 
 DIRECT_SEMANTIC_FIELDS = (
-    "nama", "nomor_rekening", "nominal_penempatan", "tenor_penempatan",
+    "nama", "nomor_rekening", "unit_kerja", "nominal_penempatan", "tenor_penempatan",
     "tanggal_mulai", "tanggal_selesai", "bentuk_reward",
     "signature_nasabah", "signature_bri",
 )
@@ -480,6 +480,7 @@ DIRECT_SEMANTIC_PROMPT = """You are given TWO images, in this order:
 Fields to extract:
 nama - the customer's own handwritten name
 nomor_rekening - account number
+unit_kerja - the BRI unit/branch office that manages the account, on the line printed "Unit Kerja Pengelola Rekening" (the third of three stacked identity lines: Nama Nasabah, then Nomor Rekening directly above this one, then this one, then Nominal Penempatan below)
 nominal_penempatan - placement amount
 tenor_penempatan - placement tenor
 tanggal_mulai - start date of the placement period (ISO format)
@@ -490,17 +491,20 @@ signature_bri - bank/branch representative's signature, in the RIGHT signature b
 
 Rules:
 - nama / nomor_rekening / nominal_penempatan: read the customer's own handwriting only. Ignore printed labels, headers, and instructions.
+- nama: some customers are businesses, not individuals. Common Indonesian legal-entity prefixes like "CV", "PT", "UD", or "Koperasi" are FIXED, well-known abbreviations -- read them as those exact known abbreviations rather than sounding out unfamiliar letters, then read the rest of the business name normally.
+- unit_kerja: this line sits directly below nomor_rekening, and the two are easy to visually merge (e.g. trailing digits of the account number bleeding into this line, or vice versa) -- read ONLY the handwritten unit/branch name written on the "Unit Kerja Pengelola Rekening" line itself, never any digits, and never the printed label text as if it were the value. If you cannot cleanly separate this line's handwriting from the account number above it, prefer null over guessing a merged value.
 - tenor_penempatan: the template prints the literal text "1 / 3 / 6 Bulan (*coret salah satu)" -- three digits separated by slashes. Customers mark their chosen digit in any of three ways, sometimes combined: (a) a strike-through/cross-out pen line drawn over the digit(s) NOT chosen, leaving the chosen one as the only one with no line through it; (b) a circle/oval drawn around the chosen digit; (c) the chosen digit re-traced/written over in bold, visibly thicker/darker ink than the printed digit and the other two options (not circled, not involving a strike on the others -- just heavier ink on the one digit). Check for all three. Report the ONE digit indicated by whichever of these signals is present (if more than one signal appears, they will agree on the same digit -- use that). Never report more than one digit, and never report the raw printed text like "1/3/6" or "3/6 Bulan". If you cannot clearly identify a single chosen digit this way, answer null.
 - tanggal_mulai / tanggal_selesai: the line directly BELOW the tenor choice line prints "(tanggal........... s/d. tanggal...........)" -- a start date and an end date the customer may write by hand in the two blanks. Read them and convert each to ISO format YYYY-MM-DD. If this line is blank/not filled in (very common -- the customer already indicated tenor via the mark above), answer null for both. Never guess a date from the tenor_penempatan digit.
 - bentuk_reward: same marking convention as tenor_penempatan (strike-through the word NOT chosen, OR circle the chosen word, OR the chosen word re-traced in bold/darker ink -- check all three, they will agree if more than one appears), printed as "tunai / non tunai (*coret salah satu)". Report ONLY "tunai" or "non_tunai" (exactly one word, underscore not space, no other text); null if unclear. Ignore anything printed or written further below this line (there is a separate instructional line about "non-tunai" details below it, printed on the form for every document regardless of choice -- it is NOT evidence of which choice was made).
-- signature_nasabah (customer, LEFT box): this specific box ALSO contains PRINTED (not handwritten) gray text reading "Opsional (Tidak Wajib) materai Rp10.000" inside a rounded rectangle -- that printed graphic is NOT a signature, ignore it completely even if it's the only thing in the box. Be LENIENT/MILD here: answer true if you see ANY handwritten mark, stroke, or partial signature in this box beyond the printed graphic, even if faint, small, or only partially visible. Answer false ONLY if the box truly has nothing beyond the printed graphic -- no added ink of any kind. When in doubt, prefer true.
-- signature_bri (bank representative, RIGHT box): this box is otherwise blank, with only a printed dotted line "(.......)". Be LENIENT/MILD here too: answer true if you see ANY handwritten ink or mark on or near that dotted line, even faint or partial. Answer false ONLY if the box is truly empty -- nothing but the printed dotted line. When in doubt, prefer true.
-- For both signature fields: absent (false) should be the harder conclusion to reach, reserved for boxes that are genuinely, clearly empty -- do not require a full, clean signature to answer true.
+- signature_nasabah (customer, LEFT box): this specific box ALSO contains PRINTED (not handwritten) gray text reading "Opsional (Tidak Wajib) materai Rp10.000" inside a rounded rectangle -- that printed graphic is NOT a signature, ignore it completely even if it's the only thing in the box. Also ignore table borders, underlines, stamps, and scan noise/smudges -- none of these count as a signature. Answer true only for an actual handwritten signature-like mark (pen strokes, a name written in cursive/script, an initial) clearly beyond the printed graphic. Answer false if the box is genuinely empty (nothing beyond the printed graphic).
+- signature_bri (bank representative, RIGHT box): this box is otherwise blank, with only a printed dotted line "(.......)". The printed dotted line itself, table borders, stamps, and scan noise/smudges do NOT count as a signature. Answer true only for an actual handwritten signature-like mark on or near that line. Answer false if the box is truly empty -- nothing but the printed dotted line.
+- For both signature fields, your `confidence` self-rating (see the JSON shape below) matters as much as the true/false value: give a LOW confidence (below 0.5) whenever the mark is faint, partial, ambiguous, could plausibly be a print artifact/smudge/stray pen touch rather than a deliberate signature, or you are otherwise not sure -- regardless of which way you lean on true/false. Reserve a HIGH confidence (0.8+) for a clear, unambiguous read (either a plainly visible signature, or a box that is plainly, cleanly empty). Do not force a confident true/false when you are actually unsure -- an honest low confidence is far more useful than a guessed high one.
 - Use null for any text/number field you cannot read with confidence. Do not guess.
+- For every field below EXCEPT the two signature fields, also report your own status: "detected" if you read it clearly and confidently, "uncertain" if you can see something there but aren't sure it's correct/complete, "not_detected" if the field is blank or not visible at all. Use null for value whenever status is "not_detected" (uncertain may still carry your best-guess value).
 - Return JSON only -- no markdown, no explanation.
 
-Reply with EXACTLY this JSON shape (confidence is your own 0.0-1.0 self-rating for that field):
-{"nama":{"value":null,"confidence":0.0},"nomor_rekening":{"value":null,"confidence":0.0},"nominal_penempatan":{"value":null,"confidence":0.0},"tenor_penempatan":{"value":null,"confidence":0.0},"tanggal_mulai":{"value":null,"confidence":0.0},"tanggal_selesai":{"value":null,"confidence":0.0},"bentuk_reward":{"value":null,"confidence":0.0},"signature_nasabah":{"value":false,"confidence":0.0},"signature_bri":{"value":false,"confidence":0.0}}"""
+Reply with EXACTLY this JSON shape (status is your own detected/uncertain/not_detected judgment for that field; the two signature fields keep a separate 0.0-1.0 confidence self-rating instead):
+{"nama":{"value":null,"status":"not_detected"},"nomor_rekening":{"value":null,"status":"not_detected"},"unit_kerja":{"value":null,"status":"not_detected"},"nominal_penempatan":{"value":null,"status":"not_detected"},"tenor_penempatan":{"value":null,"status":"not_detected"},"tanggal_mulai":{"value":null,"status":"not_detected"},"tanggal_selesai":{"value":null,"status":"not_detected"},"bentuk_reward":{"value":null,"status":"not_detected"},"signature_nasabah":{"value":false,"confidence":0.0},"signature_bri":{"value":false,"confidence":0.0}}"""
 
 
 def _clean_confidence(raw):
@@ -530,68 +534,137 @@ def _coerce_signature_bool(raw_value):
     return bool(raw_value)
 
 
+_ALLOWED_DIRECT_SEMANTIC_STATUSES = {"detected", "uncertain", "not_detected"}
+_DIRECT_SEMANTIC_SIGNATURE_FIELDS = ("signature_nasabah", "signature_bri")
+
+
 def _parse_direct_semantic_json(data):
     """Parsing for the DIRECT_SEMANTIC contract's response JSON, used by
-    extract_direct_semantic_hosted() below."""
+    extract_direct_semantic_hosted() below. The two signature fields keep
+    their own {value, confidence} contract (feeds extract_direct_semantic_
+    hosted_majority's boolean lenient voting, untouched here). Every other
+    field now reports a detected/uncertain/not_detected status directly
+    (the SAME enum Gemini's response_json_schema uses, see
+    extractors._response_json_schema/_field_entry) instead of a raw
+    self-reported 0.0-1.0 confidence -- a small VLM making a categorical
+    judgment call tends to be more reliable than it self-rating a
+    continuous score, and this now matches the shape every other engine's
+    canonical dict already provides."""
     clean = {}
     for f in DIRECT_SEMANTIC_FIELDS:
         item = data.get(f)
-        if isinstance(item, dict):
-            raw_value = item.get("value")
-            confidence = _clean_confidence(item.get("confidence", 0.0))
-        else:
-            # Model answered with a flat scalar instead of the requested
-            # {value, confidence} wrapper -- tolerate it (same defensive
-            # pattern as extract_fields_independent/extract_fields_fullpage
-            # above) rather than silently discarding a real answer just
-            # because it wasn't wrapped; no self-reported confidence number
-            # is available for this case.
-            raw_value = item
-            confidence = 0.0
-        if f in ("signature_nasabah", "signature_bri"):
-            value = _coerce_signature_bool(raw_value)
-        else:
-            value = raw_value if raw_value not in ("", None) else None
-        clean[f] = {"value": value, "confidence": confidence}
+        raw_value = item.get("value") if isinstance(item, dict) else item
+
+        if f in _DIRECT_SEMANTIC_SIGNATURE_FIELDS:
+            confidence = _clean_confidence(item.get("confidence", 0.0)) if isinstance(item, dict) else 0.0
+            clean[f] = {"value": _coerce_signature_bool(raw_value), "confidence": confidence}
+            continue
+
+        value = raw_value if raw_value not in ("", None) else None
+        status = item.get("status") if isinstance(item, dict) else None
+        if status not in _ALLOWED_DIRECT_SEMANTIC_STATUSES:
+            # Model answered with a flat scalar, or an invalid/missing
+            # status -- tolerate it (same defensive pattern as
+            # extract_fields_independent/extract_fields_fullpage above)
+            # rather than silently discarding a real answer, deriving the
+            # status from whether a value is actually present instead.
+            status = "not_detected" if value is None else "detected"
+        clean[f] = {"value": value, "status": status}
     return clean
 
 
 # ============================================================================
-# LOCAL -- runs DIRECT_SEMANTIC_PROMPT against a LOCAL Qwen3-VL-2B-Instruct
-# (extractors.run_qwen3_vl_local, engine id "qwen3_vl_local"), reusing
+# LOCAL -- runs DIRECT_SEMANTIC_PROMPT against a LOCAL Qwen model (default
+# models/Qwen3-VL-4B-Instruct, see VLM_MODEL_PATH/DEFAULT_LOCAL_CANDIDATES
+# above; extractors.run_qwen3_vl_local, engine id "qwen3_vl_local"), reusing
 # _load()/_infer() (SAME loader as the V10/V12 local fallback contracts --
 # see _load()'s "qwen3_vl" model_type branch, and its 4-bit bitsandbytes
 # quantized-load path for VRAM-constrained GPUs). Sends the SAME two images
-# (blank template + filled document) and SAME prompt/schema as the hosted
-# path, so results are directly comparable and extractors._adapt_qwen_to_
-# common needs no changes to consume either.
+# (template + document, at the SAME resolution -- see the reverted-
+# optimization note below for why they must match) and SAME prompt/schema
+# as the hosted path, so results are directly comparable and
+# extractors._adapt_qwen_to_common needs no changes to consume either.
 #
-# Honest, measured limitation (see handover.md) -- on a 2GB-VRAM GPU (e.g.
-# MX230), the image resolution has to be cut so far (VLM_MAX_SIDE_FULL
-# lowered via env, e.g. to 640) to avoid CUDA OOM that the model can no
-# longer actually read the document -- verified across a real 9-document
-# run: 0% correct on name/account number (mostly a fixed hallucinated
-# placeholder), tenor/signatures answered as a near-constant regardless of
-# the actual image. This engine is provided as-is for machines with enough
-# VRAM to use a higher MAX_SIDE_FULL; it is NOT a substitute for the hosted
-# "qwen3_vl" engine on constrained hardware.
+# Re-verified on real hardware (RTX 4060 Laptop, 8.6GB VRAM) with the
+# current 4-bit-quantized 4B model: ~15s one-time model load, ~2.9GB VRAM
+# allocated, ~22-26s per document at MAX_SIDE_FULL=1600, decoding is fully
+# deterministic (do_sample=False -- repeated calls on the same image
+# produce byte-identical output, confirmed by direct test), and field
+# values matched the hosted 30B-A3B engine on real documents. This
+# supersedes an EARLIER finding in handover.md ("~0% accuracy on name/
+# account number, forced down to VLM_MAX_SIDE_FULL=640") -- that was
+# measured on a 2GB-VRAM MX230 with the smaller 2B model, a fundamentally
+# different hardware/model combination; it does NOT describe this engine's
+# behavior on adequate VRAM and should not be assumed to still apply
+# without re-measuring on whatever hardware is actually being deployed to.
+# Bumping MAX_SIDE_FULL further was ALSO re-tested directly against this
+# combination (not assumed from the hosted-engine signature-only finding
+# already noted near HOSTED_MAX_SIDE_FULL above) on a genuinely hard
+# document (dense repeated-digit account number, ambiguous business-name
+# handwriting): 1600 -> 2200 -> 2800 did not monotonically improve, or even
+# reliably improve, accuracy on either field, while costing meaningfully
+# more time (+38% at 2800) -- the bottleneck on hard cases is the
+# handwriting itself, not this resolution range, so MAX_SIDE_FULL's default
+# is deliberately left unchanged here rather than raised on a guess.
 # ============================================================================
+
+# TRIED AND REVERTED (do not repeat without a fix to the root cause): sending
+# the template reference image at a LOWER resolution than the document image
+# (e.g. template=900 vs document=1600) looked like a free ~10% speed win on
+# an isolated single-document test (byte-identical extracted values), but a
+# full 10-document A/B run caught a real, reproducible bug the single-doc
+# test missed -- on 2 of 10 real documents, the ASYMMETRIC resolution pair
+# made the model return a blanket null/not_detected for EVERY field
+# (byte-identical output across two genuinely different document images,
+# confirmed by direct test), even though the document image was still at
+# full MAX_SIDE_FULL resolution. Isolated follow-up test on one of those
+# documents confirmed the cause directly: template=1600/doc=1600 ->
+# correct answer; template=900/doc=1600 (asymmetric) -> blanket null;
+# template=900/doc=900 (symmetric, just low-res) -> null too (document
+# genuinely needs 1600 to be legible) but does NOT show the SAME
+# byte-identical-across-documents signature as the asymmetric case. This
+# points to a real bug in how this Qwen3-VL build merges multiple images of
+# different pixel dimensions/vision-token counts, not a legitimate model
+# judgment call -- both images sent to _infer() below are kept at the SAME
+# resolution (MAX_SIDE_FULL) until/unless that root cause is understood and
+# fixed, matching what the hosted path already does for the same reason.
 
 
 def extract_direct_semantic_local(image_bgr, max_new_tokens=None):
     """Local counterpart of extract_direct_semantic_hosted() -- same two
-    images (template + document) and same DIRECT_SEMANTIC_PROMPT, but run
-    through the local model via _infer()/_load() instead of an HF API call.
-    No provider/timeout/retry concerns (nothing goes over the network) --
-    the only real constraint is local VRAM/RAM, controlled via the existing
+    images (template + document, SAME resolution -- see comment above for
+    why they must match) and same DIRECT_SEMANTIC_PROMPT, but run through
+    the local model via _infer()/_load() instead of an HF API call. No
+    provider/timeout/retry concerns (nothing goes over the network) -- the
+    only real constraint is local VRAM/RAM, controlled via the existing
     MAX_SIDE_FULL (VLM_MAX_SIDE_FULL env var) and 4-bit quantized loading in
     _load(). Returns (clean_dict, raw_text), same shape as the hosted
     function minus the meta_dict (no model/provider/elapsed_s to report --
     the caller already knows which local model is configured)."""
     template_img = _get_template_image()
     tokens = max_new_tokens or 400
-    data, raw_text = _infer([template_img, image_bgr], DIRECT_SEMANTIC_PROMPT, tokens, [MAX_SIDE_FULL, MAX_SIDE_FULL])
-    return _parse_direct_semantic_json(data), raw_text
+    data, raw_text = _infer(
+        [template_img, image_bgr], DIRECT_SEMANTIC_PROMPT, tokens,
+        [MAX_SIDE_FULL, MAX_SIDE_FULL],
+    )
+    clean = _parse_direct_semantic_json(data)
+
+    # V19f: conditional reward-detail follow-up (see section comments above
+    # REWARD_DETAIL_PROMPT/REWARD_TUNAI_DETAIL_PROMPT) -- previously ONLY
+    # wired into extract_direct_semantic_hosted_majority, so local Qwen's
+    # reward_tunai/reward_non_tunai were always the mirrored choice-word
+    # placeholder, never a real amount/description. One extra local-model
+    # call, fired only when the main call already resolved a reward choice.
+    reward_choice = clean.get("bentuk_reward", {}).get("value")
+    non_tunai_detail, tunai_detail = None, None
+    if reward_choice == "non_tunai":
+        non_tunai_detail = _extract_reward_detail_local(image_bgr)
+    elif reward_choice == "tunai":
+        tunai_detail = _extract_reward_tunai_detail_local(image_bgr)
+    clean["reward_non_tunai_detail"] = {"value": non_tunai_detail, "confidence": 0.0}
+    clean["reward_tunai_detail"] = {"value": tunai_detail, "confidence": 0.0}
+
+    return clean, raw_text
 
 
 # ============================================================================
@@ -821,6 +894,133 @@ def _extract_reward_detail_hosted(image_bgr, model, hf_token, timeout, provider=
     return value if value not in ("", None) else None
 
 
+def _extract_reward_detail_local(image_bgr):
+    """LOCAL counterpart of _extract_reward_detail_hosted -- same
+    REWARD_DETAIL_PROMPT/printed-example guard/conditional-isolation policy
+    (see the section comment above REWARD_DETAIL_PROMPT), but run through
+    the on-device model via _infer() instead of an HF API call. Added V19f:
+    extract_direct_semantic_local() previously had NO equivalent of this
+    follow-up at all, so reward_non_tunai was always the mirrored choice-word
+    placeholder for local Qwen even when the hosted engine could already get
+    a real value. Never raises on failure (best-effort enrichment), same
+    contract as the hosted version."""
+    template_img = _get_template_image()
+    try:
+        data, _raw = _infer(
+            [template_img, image_bgr], REWARD_DETAIL_PROMPT, 80, [MAX_SIDE_FULL, MAX_SIDE_FULL],
+        )
+        item = data.get("reward_non_tunai_detail")
+        value = item.get("value") if isinstance(item, dict) else item
+    except Exception as exc:
+        print(f"[qwen3_vl_local] reward_non_tunai_detail follow-up failed (non-fatal): {exc}")
+        return None
+
+    if value and _REWARD_DETAIL_PRINTED_EXAMPLE in str(value).strip().lower():
+        print(f"[qwen3_vl_local] reward_non_tunai_detail follow-up returned the printed example verbatim -- discarding: {value!r}")
+        return None
+    print(f"[qwen3_vl_local] reward_non_tunai_detail follow-up result: {value!r}")
+    return value if value not in ("", None) else None
+
+
+# ============================================================================
+# REWARD TUNAI DETAIL -- V19f, symmetric counterpart to REWARD_NON_TUNAI
+# DETAIL above. Same gap existed on the "tunai" side but for BOTH engines
+# (hosted and local): DIRECT_SEMANTIC_FIELDS has no field for the actual cash
+# amount, so extractors.adapt_common_to_pipeline_shape always fell back to
+# the literal string "tunai" for reward_tunai, never a real value. Added as
+# its own conditional call (NOT merged into DIRECT_SEMANTIC_PROMPT, same
+# reasoning as the non-tunai case above) -- fires only when the main call's
+# bentuk_reward=="tunai". Real eval data (eval_runs/evaluation_results_
+# qwen_local_v2_fixed.csv) shows this dataset's ground truth is ~100% tunai,
+# so this is the MORE commonly-hit gap of the two, not the rarer one.
+#
+# V19f FIX: the first version of this prompt guessed the amount was "on the
+# same row/area as the reward choice" -- WRONG, confirmed by reading
+# assets/template.pdf directly (real user report: reward_tunai was still
+# coming back as the literal placeholder "tunai"). The template's actual
+# printed line is its OWN separate line, several lines BELOW both the
+# Bentuk Reward choice and the non-tunai "sebutkan barang" blank:
+#   "Nilai Reward (termasuk pajak) : Rp…………………………... (……………………………………)"
+# -- same two-blank format (digits + spelled-out terbilang in parentheses)
+# as "Nominal Penempatan" above it, which the model already reads reliably
+# via DIRECT_SEMANTIC_PROMPT's nominal_penempatan field. Prompt rewritten
+# below to point at this exact line instead of guessing a position.
+# ============================================================================
+
+REWARD_TUNAI_DETAIL_PROMPT = """You are given TWO images: 1) the BLANK template of this Indonesian bank form, 2) the FILLED document.
+
+The document's "Bentuk Reward" choice was already read as "tunai" (cash reward). Several lines BELOW that choice line (and below the separate "(Jika non-tunai, sebutkan barang dengan spesifik:.....)" blank, which is not relevant here), the template prints its own line:
+"Nilai Reward (termasuk pajak) : Rp…………………………... (……………………………………)"
+This is a DIFFERENT line from "Nominal Penempatan" further up the page -- do not confuse the two. It has the same two-blank format: a Rupiah amount after "Rp", followed by that amount spelled out in words inside the parentheses.
+
+Read ONLY the customer's/bank staff's own handwritten amount written after "Nilai Reward (termasuk pajak) : Rp" on that specific line. Report it as DIGITS ONLY -- no "Rp", no thousands separators (dots/commas), and never the spelled-out words in parentheses -- e.g. answer "500000" for a handwritten "Rp500.000 (lima ratus ribu rupiah)". If that blank looks empty/unfilled, answer null. Do not invent or guess a plausible-looking number, and do not answer with the Nominal Penempatan amount instead.
+
+Reply with EXACTLY this JSON shape, no markdown, no explanation:
+{"reward_tunai_detail":{"value":null,"confidence":0.0}}"""
+
+
+def _clean_reward_tunai_digits(value):
+    """Digits-only cleanup for REWARD_TUNAI_DETAIL_PROMPT's answer -- the
+    model is already asked for digits-only, but this is a cheap safety net
+    against it echoing "Rp"/separators/spelled-out words anyway."""
+    if value in (None, ""):
+        return None
+    digits = re.sub(r"\D", "", str(value))
+    return digits or None
+
+
+def _extract_reward_tunai_detail_hosted(image_bgr, model, hf_token, timeout, provider=None):
+    """Hosted counterpart of _extract_reward_detail_hosted, for the tunai
+    amount instead of the non-tunai description (see section comment above
+    REWARD_TUNAI_DETAIL_PROMPT). Never raises on failure."""
+    from huggingface_hub import InferenceClient
+
+    template_uri = _get_template_data_uri()
+    data_uri = _encode_jpeg_data_uri(image_bgr, HOSTED_MAX_SIDE_FULL)
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": template_uri}},
+            {"type": "image_url", "image_url": {"url": data_uri}},
+            {"type": "text", "text": REWARD_TUNAI_DETAIL_PROMPT},
+        ],
+    }]
+    try:
+        client = InferenceClient(token=hf_token, timeout=timeout, provider=provider)
+        response = client.chat_completion(messages=messages, model=model, max_tokens=40, temperature=0)
+        raw_text = (response.choices[0].message.content or "") if response.choices else ""
+        data = _extract_json(raw_text)
+        item = data.get("reward_tunai_detail")
+        value = item.get("value") if isinstance(item, dict) else item
+    except Exception as exc:
+        print(f"[qwen3_vl_hosted] reward_tunai_detail follow-up failed (non-fatal): {exc}")
+        return None
+
+    value = _clean_reward_tunai_digits(value)
+    print(f"[qwen3_vl_hosted] reward_tunai_detail follow-up result: {value!r}")
+    return value
+
+
+def _extract_reward_tunai_detail_local(image_bgr):
+    """LOCAL counterpart of _extract_reward_tunai_detail_hosted, run through
+    the on-device model via _infer() instead of an HF API call. Never raises
+    on failure."""
+    template_img = _get_template_image()
+    try:
+        data, _raw = _infer(
+            [template_img, image_bgr], REWARD_TUNAI_DETAIL_PROMPT, 40, [MAX_SIDE_FULL, MAX_SIDE_FULL],
+        )
+        item = data.get("reward_tunai_detail")
+        value = item.get("value") if isinstance(item, dict) else item
+    except Exception as exc:
+        print(f"[qwen3_vl_local] reward_tunai_detail follow-up failed (non-fatal): {exc}")
+        return None
+
+    value = _clean_reward_tunai_digits(value)
+    print(f"[qwen3_vl_local] reward_tunai_detail follow-up result: {value!r}")
+    return value
+
+
 _VOTED_SIGNATURE_FIELDS = ("signature_nasabah", "signature_bri")
 
 
@@ -888,12 +1088,23 @@ def extract_direct_semantic_hosted_majority(image_bgr, model=None, hf_token=None
     # detail_hosted) -- ONLY fires when bentuk_reward is non_tunai, so it
     # costs nothing extra for the (in this dataset, universal) tunai case.
     detail_value = None
-    if final_clean.get("bentuk_reward", {}).get("value") == "non_tunai":
+    tunai_detail_value = None
+    reward_choice = final_clean.get("bentuk_reward", {}).get("value")
+    if reward_choice == "non_tunai":
         detail_value = _extract_reward_detail_hosted(
             image_bgr, model=first_meta["model"], hf_token=hf_token,
             timeout=timeout, provider=first_meta.get("provider"),
         )
+    elif reward_choice == "tunai":
+        # V19f: symmetric follow-up for the cash amount (see section comment
+        # above REWARD_TUNAI_DETAIL_PROMPT) -- this dataset's ground truth is
+        # ~100% tunai, so THIS is the branch that actually fires in practice.
+        tunai_detail_value = _extract_reward_tunai_detail_hosted(
+            image_bgr, model=first_meta["model"], hf_token=hf_token,
+            timeout=timeout, provider=first_meta.get("provider"),
+        )
     final_clean["reward_non_tunai_detail"] = {"value": detail_value, "confidence": 0.0}
+    final_clean["reward_tunai_detail"] = {"value": tunai_detail_value, "confidence": 0.0}
 
     return final_clean, first_raw_text, meta
 
