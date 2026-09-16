@@ -10,10 +10,11 @@ OCR 4.1 were removed from the selectable engines (explicit user request) --
 `run_mistral()` and its `mistralai` dependency were deleted entirely;
 `run_gemini()` stays (still used by gemini-3.8-flash) but "gemini-2.5-flash"
 is no longer a reachable engine id. "qwen3_vl_local" was added alongside
-(not instead of) "qwen3_vl" -- measured to perform very poorly on VRAM-
-constrained GPUs (see `run_qwen3_vl_local`'s docstring and handover.md), kept
-available as an explicit, separate opt-in rather than replacing the working
-hosted engine.
+(not instead of) "qwen3_vl" -- initially measured to perform very poorly on
+a VRAM-constrained (2GB) GPU, but re-verified since as usable on adequate
+hardware with the current 4B model (see `run_qwen3_vl_local`'s docstring and
+handover.md); still kept as an explicit, separate opt-in rather than the
+default engine.
 
 Design (see handover.md for the full writeup):
   - `run(engine, document_path, ...)` is the ONLY entry point other modules
@@ -61,6 +62,7 @@ import config
 import pipeline
 import postprocessing as post
 import preprocessing as prep
+import signature_detector
 import vlm
 
 # ============================================================================
@@ -303,7 +305,7 @@ def _field_entry(common, name):
 # ============================================================================
 
 
-def adapt_common_to_pipeline_shape(common, source, document_path):
+def adapt_common_to_pipeline_shape(common, source, document_path, prepared_image_bgr=None):
     """`common`: parsed JSON matching `_response_json_schema()`. `source`:
     engine/model name, stamped onto every field's "source" + `ocr_meta`.
     NEVER receives/reads a reference_record -- structurally cannot leak
@@ -421,10 +423,22 @@ def adapt_common_to_pipeline_shape(common, source, document_path):
     }
 
     # No alignment/ROI concept for API engines -- reuse the SAME raw loaded
-    # document for all 3 debug-image slots so app.py's EXISTING debug-image
-    # saving code (unchanged by this session) keeps working as-is.
+    # document for "template"/"document" (no ROI to show) and for "original"
+    # (the untouched file, for a true before/after comparison in the UI).
+    # "preprocessed" is the SAME raw image UNLESS the caller passes
+    # `prepared_image_bgr` -- V19f: Qwen's `_qwen_prepare_image` already runs
+    # preprocessing.align_with_orientation_correction's coarse 0/90/180/270
+    # ROTATION ONLY (never the full template-warp/perspective alignment --
+    # that stays exclusively V18's job) before sending the image to the
+    # model; this surfaces that SAME corrected image in app.py's existing
+    # "Preprocessed" preview box instead of silently re-loading the raw file
+    # a second time, so a rotated-photo case (e.g. the Reska Nurdianti
+    # landscape-captured document, see preprocessing.py's comment above
+    # align_with_orientation_correction) is visibly upright in the UI, not
+    # just correctly upright inside the model's own input.
     raw_img = prep.load_document(str(document_path))
-    debug_images = {"template": raw_img, "document": raw_img, "original": raw_img, "preprocessed": raw_img}
+    preprocessed_img = prepared_image_bgr if prepared_image_bgr is not None else raw_img
+    debug_images = {"template": raw_img, "document": raw_img, "original": raw_img, "preprocessed": preprocessed_img}
 
     return {
         "alignment": {"status": "not_applicable", "method": "api_extraction", "engine": source},
@@ -644,6 +658,40 @@ def _qwen_prepare_image(document_path):
 SIGNATURE_CONFIDENCE_UNCERTAIN_THRESHOLD = 0.6
 
 
+# V20 diagnostic finding: on a 25-document run of qwen3_vl_local, 6/25 (24%)
+# came back with EVERY core field -- nama/nomor_rekening/nominal_penempatan/
+# tenor_penempatan/bentuk_reward -- reported as "not_detected" in a single,
+# perfectly well-formed JSON response, on documents independently confirmed
+# (by direct visual inspection of the exact image sent to the model) to be
+# correctly oriented, legible, and structurally matching the template. This
+# is NOT the same thing as a genuinely hard-to-read document (which usually
+# still yields a PARTIAL read) -- it's the model collapsing to its own
+# "nothing here" default across every field simultaneously. Root cause is
+# still open (ruled out so far: image orientation, resolution, and image
+# order -- none of which changed the outcome on the one document tested);
+# one of the 6 collapsed documents was independently re-tried through the
+# HOSTED engine and did NOT collapse there, suggesting (not yet confirmed
+# across more than 1 document -- HF credits ran out mid-check) this may be
+# specific to the local 4-bit-quantized model rather than the shared prompt.
+# Per explicit user decision: do NOT auto-escalate to hosted (cost/quota
+# risk, hosted was separately found to be running a much larger/costlier
+# model than configured) -- only DETECT and surface this distinctly so it
+# isn't silently indistinguishable from "field genuinely blank/unreadable".
+_COLLAPSE_CORE_FIELDS = ("nama", "nomor_rekening", "nominal_penempatan", "tenor_penempatan", "bentuk_reward")
+
+
+def _is_extraction_collapsed(qwen_result):
+    """True when EVERY field in _COLLAPSE_CORE_FIELDS came back status=
+    'not_detected' in the SAME response -- see the module-level note above.
+    Deliberately excludes unit_kerja/tanggal_mulai/tanggal_selesai (routinely
+    legitimately blank even on a successful read, per DIRECT_SEMANTIC_PROMPT)
+    and the two signature fields (separate {value, confidence} contract)."""
+    return all(
+        (qwen_result.get(f) or {}).get("status") == "not_detected"
+        for f in _COLLAPSE_CORE_FIELDS
+    )
+
+
 def _signature_state(sig, threshold=SIGNATURE_CONFIDENCE_UNCERTAIN_THRESHOLD):
     """present/absent/uncertain from a DIRECT_SEMANTIC signature field's
     {value, confidence}. A low self-rated confidence -- regardless of which
@@ -695,6 +743,12 @@ def _adapt_qwen_to_common(qwen_result):
     sig_nasabah = qwen_result.get("signature_nasabah") or {}
     sig_bri = qwen_result.get("signature_bri") or {}
 
+    # V19f: vlm._parse_direct_semantic_json now canonicalizes both of these
+    # to their exact closed-set values (or None) before they ever get here
+    # -- the checks below are now a defense-in-depth safety net, not the
+    # primary filter. They used to be the ONLY filter, which meant a
+    # near-miss model answer (e.g. "3 bulan", "non tunai" with a space)
+    # was silently discarded here instead of being normalized upstream.
     tenor_value = tenor.get("value")
     try:
         tenor_value = int(tenor_value) if tenor_value is not None else None
@@ -761,10 +815,13 @@ def run_qwen3_vl_hosted(document_path, progress_callback=None, cancel_event=None
 
     _progress(progress_callback, "validate", 70, "Validating extraction")
     common = _adapt_qwen_to_common(qwen_result)
-    result = adapt_common_to_pipeline_shape(common, source="qwen3_vl", document_path=document_path)
+    result = adapt_common_to_pipeline_shape(
+        common, source="qwen3_vl", document_path=document_path, prepared_image_bgr=image_bgr,
+    )
     result["ocr_meta"]["strategy"] = "qwen3_vl_hosted_direct_semantic"
     result["ocr_meta"]["fallback_source"] = "Qwen3-VL Hosted"
     result["ocr_meta"]["qwen_confidence"] = _qwen_self_assessment(qwen_result)
+    result["ocr_meta"]["extraction_collapsed"] = _is_extraction_collapsed(qwen_result)
     # Task requirement: log model/request status/processing time/raw
     # response/parsed JSON. vlm.extract_direct_semantic_hosted already prints
     # these to stdout; also surfaced here via ocr_meta (returned verbatim by
@@ -778,20 +835,28 @@ def run_qwen3_vl_hosted(document_path, progress_callback=None, cancel_event=None
 def run_qwen3_vl_local(document_path, progress_callback=None, cancel_event=None):
     """LOCAL Qwen model test (default models/Qwen3-VL-4B-Instruct, see
     vlm.VLM_MODEL_PATH env var; engine id "qwen3_vl_local"), separate from
-    and additive to the hosted "qwen3_vl" engine above -- neither the
-    hosted engine nor its default selection in the UI/CLI is touched by this
-    one. Uses the SAME minimal image prep (_qwen_prepare_image) and adapter
-    (_adapt_qwen_to_common/adapt_common_to_pipeline_shape) as the hosted
-    path, but runs entirely on-device via vlm.extract_direct_semantic_local
-    (no network, no HF_TOKEN needed). No majority-vote: unlike the hosted
-    engine, local greedy decoding (do_sample=False) is fully deterministic
-    -- confirmed by direct test, repeated calls on the same image return
-    byte-identical output -- so voting would just repeat the same answer N
-    times for no benefit, not merely "not worth the latency" as originally
-    assumed here. Deliberately does NOT fall back to run_v18 on failure,
-    same "no silent fallback" policy as the hosted engine -- model load
-    errors (missing local weights/dependencies) or CUDA OOM propagate as a
-    real ExtractorError.
+    and additive to the hosted "qwen3_vl" engine above. Uses the SAME
+    minimal image prep (_qwen_prepare_image) and adapter (_adapt_qwen_to_
+    common/adapt_common_to_pipeline_shape) as the hosted path, but runs
+    entirely on-device via vlm.extract_direct_semantic_local_majority (no
+    network, no HF_TOKEN needed). Deliberately does NOT fall back to run_v18
+    on failure, same "no silent fallback" policy as the hosted engine --
+    model load errors (missing local weights/dependencies) or CUDA OOM
+    propagate as a real ExtractorError.
+
+    V19f: now runs the SAME lenient signature majority-vote as the hosted
+    engine (LOCAL_SIGNATURE_VOTE_COUNT, default 3, env var VLM_SIGNATURE_
+    VOTE_COUNT), per explicit user policy that local and hosted Qwen3-VL
+    should be kept aligned going forward. This supersedes the earlier
+    reasoning here ("local greedy decoding is fully deterministic, so
+    voting would just repeat the same answer for no benefit") -- that
+    determinism claim is still true given IDENTICAL input, but doesn't
+    preclude voting being useful for hosted-parity and because the timing
+    tradeoff that originally ruled it out (handover.md SS9e: ">5 minutes for
+    1 call, 3x tidak masuk akal") no longer holds on the hardware the 4B
+    model was validated on (~22-26s/doc, see vlm.py's comment above
+    extract_direct_semantic_local). Set VLM_SIGNATURE_VOTE_COUNT=1 to
+    restore a single deterministic call on slower local hardware.
 
     Re-verified on real hardware (RTX 4060 Laptop, 8.6GB VRAM), see
     vlm.py's module comment above extract_direct_semantic_local for the
@@ -810,7 +875,7 @@ def run_qwen3_vl_local(document_path, progress_callback=None, cancel_event=None)
     _progress(progress_callback, "extract", 35, extract_label)
     try:
         with _ProgressHeartbeat(progress_callback, "extract", 35, extract_label):
-            qwen_result, raw_text = vlm.extract_direct_semantic_local(image_bgr)
+            qwen_result, raw_text, request_meta = vlm.extract_direct_semantic_local_majority(image_bgr)
     except Exception as exc:
         raise ExtractorError(f"Local Qwen3-VL inference failed ({type(exc).__name__}): {exc}",
                               stage=_classify_api_exception(exc)) from exc
@@ -818,11 +883,211 @@ def run_qwen3_vl_local(document_path, progress_callback=None, cancel_event=None)
 
     _progress(progress_callback, "validate", 70, "Validating extraction")
     common = _adapt_qwen_to_common(qwen_result)
-    result = adapt_common_to_pipeline_shape(common, source="qwen3_vl_local", document_path=document_path)
+    result = adapt_common_to_pipeline_shape(
+        common, source="qwen3_vl_local", document_path=document_path, prepared_image_bgr=image_bgr,
+    )
     result["ocr_meta"]["strategy"] = "qwen3_vl_local_direct_semantic"
     result["ocr_meta"]["fallback_source"] = "Qwen3-VL Local"
     result["ocr_meta"]["qwen_confidence"] = _qwen_self_assessment(qwen_result)
     result["ocr_meta"]["qwen_raw_response"] = raw_text
+    result["ocr_meta"]["qwen_local_request"] = request_meta
+    result["ocr_meta"]["extraction_collapsed"] = _is_extraction_collapsed(qwen_result)
+    _progress(progress_callback, "done", 100, "Complete")
+    return result
+
+
+# ============================================================================
+# V20 -- HYBRID: Qwen3-VL Local (semantic fields) + local YOLOS signature
+# detector (signature fields ONLY). Engine id "qwen3_vl_local_yolos". Does
+# NOT modify/replace "qwen3_vl_local" above in any way -- purely additive, a
+# separate opt-in engine. See signature_detector.py for the detector itself
+# and handover.md for the full architecture writeup.
+#
+# NOTE: originally targeted Tech4Humans' YOLOv8 signature detector
+# (tech4humans/yolov8s-signature-detector), but that repo turned out to be
+# GATED on Hugging Face Hub (requires manually accepting access on the
+# website -- confirmed no scriptable path around it, even with a valid
+# HF_TOKEN). Swapped to mdefrance/yolos-tiny-signature-detection (Apache-2.0,
+# NOT gated, verified downloadable) per explicit user decision -- see
+# signature_detector.py's module docstring for the full story.
+#
+# Confidentiality requirement (explicit): this engine must NEVER touch
+# hosted/API inference of any kind. Both local dependencies (Qwen3-VL local
+# weights, local signature-detector weights) are checked BEFORE any image
+# preparation or inference starts -- a missing dependency blocks the whole
+# request with a clear error, never a partial Qwen-then-fail.
+# ============================================================================
+
+
+def _hybrid_readiness():
+    """Pre-flight check for BOTH local dependencies the hybrid engine needs.
+    Cheap -- resolves paths only, never loads either model (unless one is
+    already cached from a prior call in this process). Returns a dict:
+    {"qwen_local": "ready"|"blocked: <reason>",
+     "signature_detector": "ready"|"blocked: <reason>",
+     "engine": "ready"|"blocked"}"""
+    try:
+        vlm._resolve_model_path()
+        qwen_status = "ready"
+    except Exception as exc:
+        qwen_status = f"blocked: {exc}"
+
+    sig_ready, sig_reason = signature_detector.is_ready()
+    signature_detector_status = "ready" if sig_ready else f"blocked: {sig_reason}"
+
+    engine_status = "ready" if (qwen_status == "ready" and signature_detector_status == "ready") else "blocked"
+    return {"qwen_local": qwen_status, "signature_detector": signature_detector_status, "engine": engine_status}
+
+
+def _assign_signature_roles(detections, image_shape):
+    """Buckets local signature-detector detections into signature_nasabah
+    (LEFT) vs signature_atasan (RIGHT) by REUSING preprocessing.
+    SIGNATURE_CONFIG's normalized value_bbox geometry -- the SAME
+    coordinates vlm.py's own prompt already cites verbally for Qwen's
+    benefit -- as a generous region gate rather than a tight pixel-perfect
+    crop, since this engine's image prep (_qwen_prepare_image) only does
+    EXIF+coarse-rotation, no perspective alignment/warp. NOT a second ROI
+    system -- no new geometry is invented here, only a looser tolerance
+    applied to the existing numbers.
+
+    Margins (0.06 x, 0.08 y) are chosen so the two regions never overlap
+    (the real gap between the two boxes' x-ranges is ~0.134, so 0.06 margin
+    on each side leaves a safety margin). Spot-checked this session against
+    ONE real document's real detections (see handover.md): 4 of 5 real
+    detections landed inside/outside the expected regions exactly as
+    intended, but one plausible detection fell ~2 percentage points outside
+    the y-margin -- flagged as a real, observed case suggesting the y-margin
+    may need widening once more real documents are available, not yet acted
+    on without more evidence.
+
+    For each role, the highest-confidence detection whose center falls
+    inside that role's expanded region is converted via the EXISTING,
+    unchanged extractors._signature_state() (so the detector's confidence
+    flows through the SAME present/uncertain boundary Qwen's own confidence
+    already uses) -- no detection in a region -> confidence=None -> a clean
+    "absent" (never a false "uncertain").
+
+    Returns {"signature_nasabah": {"state": ..., "diagnostic": {...}},
+             "signature_atasan": {"state": ..., "diagnostic": {...}}}."""
+    h, w = image_shape[0], image_shape[1]
+    margin_x, margin_y = 0.06, 0.08
+    roles = {}
+    for name, cfg in prep.SIGNATURE_CONFIG.items():
+        x1, y1, x2, y2 = cfg["value_bbox"]
+        region = (x1 - margin_x, y1 - margin_y, x2 + margin_x, y2 + margin_y)
+        best = None
+        for det in detections:
+            bx1, by1, bx2, by2 = det["bbox"]
+            cx, cy = ((bx1 + bx2) / 2) / w, ((by1 + by2) / 2) / h
+            if region[0] <= cx <= region[2] and region[1] <= cy <= region[3]:
+                if best is None or det["confidence"] > best["confidence"]:
+                    best = det
+
+        if best is not None:
+            state = _signature_state({"value": True, "confidence": best["confidence"]})
+            diagnostic = {
+                "detector": "yolos_local", "confidence": best["confidence"],
+                "bbox": best["bbox"], "status": state,
+            }
+        else:
+            state = _signature_state({"value": False, "confidence": None})
+            diagnostic = {"detector": "yolos_local", "confidence": None, "bbox": None, "status": state}
+        roles[name] = {"state": state, "diagnostic": diagnostic}
+    return roles
+
+
+def run_qwen3_vl_local_yolos(document_path, progress_callback=None, cancel_event=None):
+    """HYBRID engine (id "qwen3_vl_local_yolos"): Qwen3-VL Local for ALL
+    semantic fields (nama/nomor_rekening/unit_kerja/nominal_penempatan/
+    tenor_penempatan/bentuk_reward), a local YOLOS signature detector
+    (signature_detector.py) as the AUTHORITATIVE signature detector for
+    signature_nasabah/signature_atasan -- Qwen's own signature judgment is
+    discarded from the final result (kept only as a diagnostic, see
+    ocr_meta["qwen_raw_signature_diagnostic"] below).
+
+    Hard local-only gate: BOTH local dependencies are checked via
+    _hybrid_readiness() as the FIRST thing this function does, before any
+    image preparation or inference -- a missing dependency raises
+    ExtractorError immediately (never a partial Qwen-then-fail), and this
+    engine never falls back to run_qwen3_vl_local/run_qwen3_vl_hosted/any
+    other engine, matching the "no silent fallback" policy already used by
+    every other Qwen-based engine here.
+
+    Skips Qwen's own 3x signature majority-vote entirely (calls
+    vlm.extract_direct_semantic_local -- the existing single-call, no-vote
+    building block, NOT extract_direct_semantic_local_majority) since
+    Qwen's signature answer is going to be overridden anyway -- avoids 3x
+    the local inference cost for a result that would be discarded. This
+    does NOT touch run_qwen3_vl_local's own behavior in any way; both
+    functions call independent vlm.py entry points.
+
+    extraction_collapsed is computed from the SAME qwen_result (before any
+    signature override) via the SAME extractors._is_extraction_collapsed
+    definition used everywhere else -- unaffected by the signature source
+    (that function only ever reads the 5 non-signature core fields)."""
+    readiness = _hybrid_readiness()
+    if readiness["engine"] != "ready":
+        if readiness["signature_detector"] != "ready":
+            raise ExtractorError(
+                "Local signature detector is unavailable. Hybrid processing blocked to protect "
+                f"document confidentiality. ({readiness['signature_detector']})",
+                stage="API_AUTH",
+            )
+        raise ExtractorError(
+            f"Qwen3-VL local model is unavailable. Hybrid processing blocked. ({readiness['qwen_local']})",
+            stage="API_AUTH",
+        )
+
+    _progress(progress_callback, "prepare", 10, "Preparing document (minimal, no ROI)")
+    _check_cancel(cancel_event, "prepare")
+    image_bgr = _qwen_prepare_image(document_path)
+
+    extract_label = f"Extracting with {ENGINE_LABELS.get('qwen3_vl_local_yolos')}"
+    _progress(progress_callback, "extract", 35, extract_label)
+    try:
+        with _ProgressHeartbeat(progress_callback, "extract", 35, extract_label):
+            qwen_result, raw_text = vlm.extract_direct_semantic_local(image_bgr)
+    except Exception as exc:
+        raise ExtractorError(f"Local Qwen3-VL inference failed ({type(exc).__name__}): {exc}",
+                              stage=_classify_api_exception(exc)) from exc
+    _check_cancel(cancel_event, "extract")
+
+    _progress(progress_callback, "detect_signatures", 60, "Detecting signatures (local YOLOS)")
+    try:
+        detections = signature_detector.detect_signatures(image_bgr)
+    except Exception as exc:
+        raise ExtractorError(f"Local signature detection failed ({type(exc).__name__}): {exc}",
+                              stage="API_AUTH") from exc
+    _check_cancel(cancel_event, "detect_signatures")
+    signature_roles = _assign_signature_roles(detections, image_bgr.shape)
+
+    _progress(progress_callback, "validate", 70, "Validating extraction")
+    common = _adapt_qwen_to_common(qwen_result)
+    qwen_raw_signature_diagnostic = {
+        "signature_nasabah": qwen_result.get("signature_nasabah"),
+        "signature_bri": qwen_result.get("signature_bri"),
+    }
+    # The actual override -- everything else about `common` (all semantic
+    # fields) is untouched, exactly what plain qwen3_vl_local would have
+    # produced from this same Qwen call.
+    common["signature_nasabah"] = signature_roles["signature_nasabah"]["state"]
+    common["signature_atasan"] = signature_roles["signature_atasan"]["state"]
+
+    result = adapt_common_to_pipeline_shape(
+        common, source="qwen3_vl_local_yolos", document_path=document_path, prepared_image_bgr=image_bgr,
+    )
+    result["ocr_meta"]["strategy"] = "qwen3_vl_local_yolos_hybrid"
+    result["ocr_meta"]["fallback_source"] = "Qwen3-VL Local + YOLOS Signature"
+    result["ocr_meta"]["qwen_confidence"] = _qwen_self_assessment(qwen_result)
+    result["ocr_meta"]["qwen_raw_response"] = raw_text
+    result["ocr_meta"]["extraction_collapsed"] = _is_extraction_collapsed(qwen_result)
+    result["ocr_meta"]["signature_detector_signatures"] = {
+        "signature_nasabah": signature_roles["signature_nasabah"]["diagnostic"],
+        "signature_atasan": signature_roles["signature_atasan"]["diagnostic"],
+    }
+    # Qwen's own (superseded) signature judgment kept purely for
+    # diagnostics/comparison -- NEVER used as the final signature result.
+    result["ocr_meta"]["qwen_raw_signature_diagnostic"] = qwen_raw_signature_diagnostic
     _progress(progress_callback, "done", 100, "Complete")
     return result
 
@@ -834,8 +1099,15 @@ def run_qwen3_vl_local(document_path, progress_callback=None, cancel_event=None)
 ENGINE_LABELS = {
     "v18": "V18 Existing",
     "gemini-3.8-flash": "Gemini 3.8 Flash",
-    "qwen3_vl": "Qwen3-VL-2B (HF Hosted)",
-    "qwen3_vl_local": "Qwen3-VL-2B (Local GPU, EXPERIMENTAL)",
+    "qwen3_vl": "Qwen3-VL-4B (HF Hosted)",
+    "qwen3_vl_local": "Qwen3-VL-4B (Local GPU, EXPERIMENTAL)",
+    # V20 -- HYBRID, additive to qwen3_vl_local above (does not replace it):
+    # same Qwen3-VL Local semantic extraction, but signature_nasabah/
+    # signature_atasan come from a local YOLOS signature detector
+    # (signature_detector.py) instead of Qwen's own judgment. Hard
+    # local-only gate (see run_qwen3_vl_local_yolos) -- never touches
+    # hosted/API inference.
+    "qwen3_vl_local_yolos": "Qwen3-VL Local + YOLOS Signature",
 }
 
 ENGINES = tuple(ENGINE_LABELS)
@@ -861,6 +1133,9 @@ def run(engine, document_path, progress_callback=None, reference_record=None, ca
         result = run_qwen3_vl_hosted(document_path, progress_callback=progress_callback, cancel_event=cancel_event)
     elif engine == "qwen3_vl_local":
         result = run_qwen3_vl_local(document_path, progress_callback=progress_callback, cancel_event=cancel_event)
+    elif engine == "qwen3_vl_local_yolos":
+        result = run_qwen3_vl_local_yolos(document_path, progress_callback=progress_callback,
+                                           cancel_event=cancel_event)
     else:
         raise InvalidExtractor(engine)
     # V19 sec 5 -- metadata.version stamp, same for every engine (comparison

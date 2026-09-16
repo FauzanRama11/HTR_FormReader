@@ -33,5 +33,12 @@ USD_IDR_RATE = 16300.0
 # Env vars QWEN_MODEL/HF_REQUEST_TIMEOUT_S override these at call time
 # (extractors.py never hardcodes either) -- these are just the defaults when
 # those env vars are unset.
-QWEN_MODEL_DEFAULT = "Qwen/Qwen3-VL-2B-Instruct"
+# V19f: aligned to the same 4B model validated for the local engine
+# (vlm.DEFAULT_LOCAL_CANDIDATES / models/Qwen3-VL-4B-Instruct) instead of the
+# smaller 2B model, per explicit user policy that local and hosted Qwen3-VL
+# must be kept in sync going forward. Confirm this exact id is actually
+# resolvable through the configured HF Inference Provider before relying on
+# it in production -- it was not live-verified against the hosted API in the
+# session that made this change.
+QWEN_MODEL_DEFAULT = "Qwen/Qwen3-VL-4B-Instruct"
 HF_REQUEST_TIMEOUT_S = 60

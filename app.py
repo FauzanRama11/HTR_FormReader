@@ -59,6 +59,7 @@ except ImportError:
 import comparison
 import data_input
 import extractors
+import live_evaluation
 import pipeline
 import preprocessing as prep
 import postprocessing as post
@@ -204,7 +205,14 @@ def _run_ocr_and_format(request_id, document_path, data_entry_record=None, engin
     TUNGGAL -- TIDAK PERNAH menjalankan >1 extractor utk satu dokumen, TIDAK
     PERNAH fallback diam-diam ke extractor lain kalau yang dipilih gagal
     (kegagalan API tetap kegagalan, ditangkap oleh try/except pemanggil yang
-    SUDAH ADA -- lihat process_document/_process_one_record)."""
+    SUDAH ADA -- lihat process_document/_process_one_record).
+
+    V20: `t0`/`processing_time_seconds` below wrap the ENTIRE function body
+    (extraction + debug-image save + comparison/decision) with a monotonic
+    timer -- purely additive instrumentation for the Live Evaluation feature
+    (live_evaluation.py), no change to what's computed or returned otherwise.
+    """
+    t0 = time.monotonic()
 
     def progress_callback(payload):
         _set_progress(request_id, status="processing", **payload)
@@ -266,14 +274,27 @@ def _run_ocr_and_format(request_id, document_path, data_entry_record=None, engin
             notes = [n for n in notes if n not in
                      ("ROI Bermasalah", "OCR Kurang Yakin", "Fallback OCR Digunakan")]
         notes.append(f"Extractor: {extractors.ENGINE_LABELS.get(engine, engine)}")
+        # V20: qwen3_vl/qwen3_vl_local flag a distinct "collapsed" state
+        # (extractors._is_extraction_collapsed) when EVERY core field came
+        # back not_detected in one otherwise well-formed response -- a
+        # reproducible model failure mode found on ~24% of a real 25-doc
+        # sample, NOT the same thing as a genuinely blank/unreadable
+        # document. Surfaced as its own badge (purely informational, no
+        # auto-retry/escalation per explicit user decision) so it isn't
+        # silently indistinguishable from an ordinary "field unreadable"
+        # result in the notes/decision reasons above.
+        if ocr_meta.get("extraction_collapsed"):
+            notes.append("Extraction Collapsed")
         decision_v9_2["notes"] = notes
     # final_status: dipakai sbg fallback utk Tab 1 (upload manual tanpa
     # pembanding), tetap dihitung selalu.
     final_status = comparison.compute_final_status(fields)
 
     _set_progress(request_id, status="done", step="done", percent=100, message="Selesai diproses")
+    processing_time_seconds = round(time.monotonic() - t0, 3)
     return {
         "request_id": request_id,
+        "processing_time_seconds": processing_time_seconds,
         "alignment": result["alignment"],
         "fields": fields,
         "groups": result["groups"],
@@ -648,6 +669,19 @@ def sheet_result(session_id: str, record_no: int):
         status_code=404,
         content={"error": f"Hasil belum tersedia (status: {status}).", "status": status, "detail": error},
     )
+
+
+@app.get("/api/sheet/evaluation/{session_id}")
+def sheet_evaluation(session_id: str):
+    """V20 -- Live Evaluation modal. Pure read/aggregation over ALREADY-
+    processed results (session["results"], the same latest-per-record store
+    'result' fetches read from) -- NEVER triggers OCR/processing, safe to
+    call repeatedly. 404 shape matches sheet_batch_status/sheet_result above
+    so the frontend's existing error-message handling works unmodified."""
+    session = _SESSIONS.get(session_id)
+    if session is None:
+        return JSONResponse(status_code=404, content={"error": "Sesi spreadsheet tidak ditemukan."})
+    return live_evaluation.build_session_evaluation(session)
 
 
 @app.get("/api/sheet/export/{session_id}")

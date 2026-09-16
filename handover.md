@@ -1,6 +1,6 @@
 # HANDOVER — OCR Pipeline Preprocessing & Evaluation
 
-**Last update:** 14 September 2026 (V19e -- local Qwen3-VL-2B pada GPU 2GB TERBUKTI tidak usable, engine "qwen3_vl_local" ditambahkan sbg opsi terpisah, lihat §9e; V19c -- ganti engine "qwen2_vl" lokal jadi "qwen3_vl" Hugging Face HOSTED, lihat §9c; V19 -- Qwen2-VL direct-semantic pipeline + Gemini token/cost tracking, lihat §9b)
+**Last update:** 16 September 2026 (V20 -- HYBRID engine baru "qwen3_vl_local_yolos" [Qwen3-VL Local + YOLOS signature detector, hard local-only gate, additive thd qwen3_vl_local yg TIDAK diubah], vendor asli Tech4Humans YOLOv8 dibatalkan krn repo HF gated [tidak ada akses scriptable], diganti `mdefrance/yolos-tiny-signature-detection` [non-gated, Apache-2.0, NOL dependency pip baru] atas pilihan eksplisit user, kode selesai DAN diuji end-to-end NYATA tanpa mocking [Qwen asli + YOLOS asli, termasuk sesi live server sungguhan], lihat §9i; V20 -- Live Evaluation feature di Record Table (tombol "Evaluasi", modal metrik agregat dari hasil TERSIMPAN saja, tidak pernah OCR ulang), terverifikasi end-to-end nyata (server sungguhan, upload+proses+rerun asli), lihat §9h; V20 -- root-cause investigasi "Extraction Collapsed" pd local Qwen3-VL-4B: CONFIRMED non-determinism run-to-run di level inference runtime (BUKAN dokumen/prompt/schema) -- dokumen yg sama collapse 100% di satu peluncuran proses & berhasil 100% di peluncuran lain, direplikasi 3x independen, lihat §9g; V19f -- V18 DIBEKUKAN sampai user minta lagi, Qwen3-VL 4B disamakan antara local & hosted, signature majority-vote ON by default utk local juga, kanonikalisasi tenor/reward, lihat §9f; V19e -- local Qwen3-VL-2B pada GPU 2GB TERBUKTI tidak usable, engine "qwen3_vl_local" ditambahkan sbg opsi terpisah, lihat §9e; V19c -- ganti engine "qwen2_vl" lokal jadi "qwen3_vl" Hugging Face HOSTED, lihat §9c; V19 -- Qwen2-VL direct-semantic pipeline + Gemini token/cost tracking, lihat §9b)
 **Baca urutan:** 1 (deskripsi) → 2 (state) → 3 (next steps) → sisanya kalau perlu detail.
 **Prinsip kerja:** MEASURE → FIND ROOT CAUSE → FIX → RE-EVALUATE. **Satu perubahan
 kecil, satu pengukuran full 25-dokumen, baru lanjut** — V14 sengaja hanya 1 fix
@@ -1723,7 +1723,305 @@ local_qwen_eval_results.csv` (9 baris hasil, bukti mentah).
 fallback (`extract_fields_independent`/`extract_fields_fullpage`, masih
 CPU-only spt sblmnya krn `LOAD_IN_4BIT_ENV` auto-off di CPU).
 
+## 9f. V19f — Qwen3-VL 4B Alignment (Local <-> Hosted), Signature Majority-Vote utk Local, Tenor/Reward Canonicalization, V18 Freeze (SELESAI, spot-check direkomendasikan -- BUKAN full benchmark)
+
+**V18 DIBEKUKAN mulai sesi ini** (permintaan eksplisit user): pipeline
+deterministik V18 (`pipeline.py`/`preprocessing.py`/`postprocessing.py` --
+template alignment + ROI + PaddleOCR + fallback VLM lokal) TIDAK BOLEH
+disentuh internalnya lagi sampai user secara eksplisit minta lagi ("saya
+akan mention lagi kalau perlu"). Ini men-supersede framing "Prioritas
+Berikutnya" di §10 di bawah -- semua item di situ masih soal internal
+V18/preprocessing/ROI, JANGAN dikerjakan tanpa izin baru dari user,
+terlepas dari seberapa jelas root cause-nya kelihatan. Fokus kerja mulai
+sesi ini DIALIHKAN ke Qwen3-VL (`qwen3_vl`/`qwen3_vl_local`), dgn kebijakan
+BARU yg men-supersede §9c/§9e ("local changes must not affect hosted
+defaults"): apa pun yg diubah utk local HARUS ikut diterapkan ke hosted
+juga, supaya kedua engine tetap sejalan.
+
+**Retroactive documentation -- commit `1909f86` ("fix - current fix, needed
+to evaluate the reward and tenor"), TIDAK PERNAH ditulis di handover ini
+sblm sesi ini:**
+- `vlm.py`: field `unit_kerja` ditambahkan ke `DIRECT_SEMANTIC_PROMPT`
+  (rule anti-leakage sendiri thd nomor_rekening di atasnya); rule baru utk
+  `nama` (prefiks badan usaha CV/PT/UD/Koperasi dibaca sbg singkatan baku,
+  bukan dieja huruf per huruf); rule signature DIKETATKAN lagi (revert
+  dari wording "LENIENT/generous" balik ke strict -- jawab true HANYA utk
+  goresan tanda tangan asli, false kalau kosong) + kalibrasi confidence
+  eksplisit (low <0.5 utk ambigu, high >=0.8 HANYA utk yg jelas); status
+  per-field non-signature diganti dari confidence 0.0-1.0 mentah jadi
+  kategori `detected/uncertain/not_detected` (`_parse_direct_semantic_
+  json` ditulis ulang, `_ALLOWED_DIRECT_SEMANTIC_STATUSES` baru);
+  follow-up call BARU `REWARD_TUNAI_DETAIL_PROMPT`/`_extract_reward_
+  tunai_detail_hosted`/`_extract_reward_tunai_detail_local` (simetris dgn
+  follow-up non-tunai yg sudah ada, §9d) utk baca nominal reward tunai;
+  follow-up reward (tunai maupun non-tunai) PERTAMA KALI disambungkan ke
+  `extract_direct_semantic_local()` juga -- sebelumnya HANYA hosted yg
+  dapat detail asli, local selalu dapat placeholder kata pilihan
+  ("tunai"/"non_tunai" mentah). Comment (BELUM diverifikasi lewat eval
+  formal di sesi manapun sblm sesi ini) juga mengklaim local Qwen3-VL
+  sudah di-re-verify di hardware RTX 4060 Laptop (8.6GB VRAM) pakai model
+  4B 4-bit -- lihat detail di bawah, klaim ini yg jadi pemicu utama fix
+  sesi ini.
+- `comparison.py`: threshold match nama diganti dari 1 angka
+  (`NAME_FUZZY_MATCH_THRESHOLD=80`) jadi 3-state (`NAME_PASS_
+  THRESHOLD=90`/`NAME_MISMATCH_THRESHOLD=55`, status tengah "uncertain"
+  -> "perlu_review", TIDAK PERNAH diam2 ditampilkan sbg match).
+  `_calendar_month_diff` tidak lagi pakai `abs()` + guard baru
+  `reversed_date_range` di `derive_tenor_from_range` (postprocessing.py)
+  supaya rentang tanggal terbalik TIDAK diam2 ditukar jadi tenor karangan.
+  Badge UI baru via `_extra_validation_notes()` ("Name Mismatch", "Name
+  Uncertain", "Invalid/Reversed Date Range", "Tenor Conflict", "Reward
+  Uncertain", "Signature Absent").
+- `postprocessing.py`: nama bulan singkatan (Indonesia+Inggris, mis.
+  "Sep"/"Mar") ditambah ke `_ID_MONTHS`; regex baru utk buang label bocor
+  "No Rek:" sblm substitusi huruf->digit di `normalize_numeric`.
+
+**Kenapa sesi ini terjadi (bug aktif, dikonfirmasi via `ls models/`):**
+`vlm.DEFAULT_LOCAL_CANDIDATES` mendaftar `models/Qwen3-VL-2B-Instruct`
+LEBIH DULU drpd `Qwen2-VL-2B-Instruct` -- tapi folder itu **TIDAK PERNAH
+ADA** di disk (hanya `Qwen2-VL-2B-Instruct` dan `Qwen3-VL-4B-Instruct` yg
+benar2 ada). Akibatnya `qwen3_vl_local` diam2 SELALU jalan pakai
+`Qwen2-VL-2B-Instruct` lama, BUKAN model 4B yg diklaim comment `1909f86`
+sudah di-re-verify -- inkonsistensi nyata antara comment & perilaku kode
+yg TIDAK PERNAH diperiksa ulang sblm sesi ini.
+
+**Perubahan kode sesi ini:**
+- `vlm.DEFAULT_LOCAL_CANDIDATES`: `Qwen3-VL-2B-Instruct` (tdk pernah ada)
+  dihapus, `Qwen3-VL-4B-Instruct` jadi kandidat pertama, `Qwen2-VL-2B-
+  Instruct` tetap fallback. `_resolve_model_path()`'s online-fallback repo
+  id & pesan error disesuaikan.
+- `config.QWEN_MODEL_DEFAULT` & `.env.example`'s `QWEN_MODEL`: diubah dari
+  `Qwen/Qwen3-VL-2B-Instruct` ke `Qwen/Qwen3-VL-4B-Instruct` (permintaan
+  eksplisit user: hosted disamakan ke model 4B yg sama dgn local, drpd
+  mengejar referensi "30B-A3B" di comment yg tidak pernah menyebut repo id
+  konkret). **Sudah di-live-test** sesi ini thd HF Inference API nyata
+  (`evaluation.py --engine qwen3_vl --limit 1`, `eval_runs/
+  v19f_hosted_spotcheck.csv/json`) -- request BERHASIL (33.6s incl. 3x vote
+  + 1 follow-up, no auth/model-not-found error), jadi id ini dikonfirmasi
+  resolvable via provider auto-routing saat ini.
+- `ENGINE_LABELS` (`extractors.py`): label "Qwen3-VL-2B" -> "Qwen3-VL-4B"
+  utk kedua engine (hosted & local).
+- Majority-vote signature: helper baru `vlm._aggregate_signature_votes()`
+  (kebijakan lenient any-present-wins, PERSIS sama dgn yg sudah ada utk
+  hosted) di-share oleh hosted (`extract_direct_semantic_hosted_majority`,
+  di-refactor pakai helper ini, perilaku TIDAK berubah) DAN fungsi BARU
+  `extract_direct_semantic_local_majority()` utk local. Env var baru
+  `VLM_SIGNATURE_VOTE_COUNT` (`vlm.LOCAL_SIGNATURE_VOTE_COUNT`), default
+  **"3" (ON by default, keputusan eksplisit user)** -- supersede kebijakan
+  §9e ("TIDAK ADA majority-vote lokal, 1x inferensi sudah >5 menit di
+  hardware lama"); dgn ~22-26s/dok di hardware RTX4060 yg diklaim comment
+  `1909f86`, 3x vote jadi ~1 menit/dok, dianggap terjangkau.
+  `run_qwen3_vl_local()` di `extractors.py` disambungkan ke fungsi
+  majority ini (bukan single-call lagi); `ocr_meta["qwen_local_request"]`
+  baru utk transparansi votes/signature_votes, sejajar dgn
+  `qwen_hosted_request` yg sudah ada.
+- Kanonikalisasi minimal utk `tenor_penempatan`/`bentuk_reward` di
+  `vlm._parse_direct_semantic_json()` (`_canonicalize_tenor_penempatan`/
+  `_canonicalize_bentuk_reward`) -- SEBELUMNYA jawaban model yg near-miss
+  (mis. "3 bulan" bukan "3", "non tunai" [pakai spasi] bukan "non_tunai")
+  lolos mentah lalu diam2 hilang jadi `None` DUA langkah di hilir
+  (`extractors._adapt_qwen_to_common`'s `int()` cast murni / exact-tuple
+  check) SEBELUM normalisasi `comparison.py` yg sudah teruji sempat jalan
+  sama sekali. Scope kanonikalisasi ini SENGAJA minimal (cuma strip
+  suffix satuan + normalisasi spasi/underscore/case) -- fold leksikal yg
+  lebih luas (mis. "cash"->"tunai") TETAP TUGAS `comparison._normalize_
+  for_compare` saja, supaya tidak ada 2 salinan aturan "apa itu tunai" yg
+  bisa divergen. Kalau tidak match set tertutup `{"1","3","6"}`/
+  `{"tunai","non_tunai"}`, value jadi `None` & status dipaksa
+  `"uncertain"` (bukan silently lolos atau `"not_detected"`).
+- Ambiguitas konvensi coret/lingkar utk `bentuk_reward`/`tenor_penempatan`
+  (§9d: pernah dicoba digeneralisasi & di-revert krn regresi "record 6")
+  -- DIKONFIRMASI (baca ulang `DIRECT_SEMANTIC_PROMPT` langsung) prompt yg
+  LIVE sekarang SUDAH minta model cek strike-through, circle, DAN
+  bold-retrace utk kedua field itu. TIDAK ADA perubahan kode di sesi ini
+  utk ini -- HANYA re-konfirmasi wording yg sudah ada, belum di-spot-check
+  ulang thd dokumen "record 6" yg dulu regresi (lihat item terbuka di
+  bawah).
+
+**Spot-check 1-dokumen sesi ini (`eval_runs/v19f_spotcheck.*` [local],
+`eval_runs/v19f_hosted_spotcheck.*` [hosted], record "BO MEDAN GATOT
+SUBROTO"), BUKAN benchmark formal (1 dokumen saja, sesuai permintaan
+eksplisit user utk menunda benchmark):**
+- Hosted (`Qwen/Qwen3-VL-4B-Instruct`): request BERHASIL, 33.6s total (3x
+  vote + 1 reward-detail follow-up), TIDAK ada error auth/model-not-found
+  -- id BARU ini dikonfirmasi resolvable via provider auto-routing saat
+  ini.
+- Local (mesin sesi ini KEBETULAN persis RTX 4060 Laptop yg direferensikan
+  comment `1909f86`, tapi VRAM bebas cuma ~3.1GB drpd 8.6GB penuh krn
+  proses lain sedang jalan): BERHASIL load model 4B + selesai tanpa OOM,
+  197.29s utk 3x vote + 1 follow-up (~66s/vote) -- LEBIH LAMBAT dari klaim
+  comment (~22-26s/dok utk 1 call), kemungkinan besar krn VRAM/GPU
+  ternyata dipakai bersama proses lain sesi ini, BUKAN direplikasi di
+  kondisi VRAM penuh/idle. Anggap timing asli comment sbg BELUM
+  direplikasi persis; behavior fungsional (tidak OOM, hasil benar) SUDAH
+  dikonfirmasi.
+- Kedua engine: `tenor_penempatan` & `bentuk_reward` cocok ground truth
+  (kanonikalisasi baru bekerja pd data nyata, bukan cuma unit test).
+  Signature: local 3 vote SEPAKAT (True/True utk kedua field pd dokumen
+  ini -- tidak ada perpecahan vote pd sample n=1 ini). `nama_nasabah`/
+  `nomor_rekening`/`nominal_penempatan` MASIH salah baca di kedua engine
+  pd dokumen ini -- konsisten dgn keterbatasan tulisan-tangan yg sudah
+  didokumentasikan (§9d/9e), BUKAN regresi baru dari perubahan sesi ini.
+- **BELUM dikerjakan**: re-verify dokumen "record 6" (§9d, regresi
+  circle-marking) scr spesifik, dan full re-run `evaluation.py` thd
+  seluruh dataset (25 dokumen) utk kedua engine -- tetap ditunda sesuai
+  permintaan user, bukan lupa dikerjakan.
+
+**TIDAK disentuh sesi ini:** V18 internal (`pipeline.py` core,
+`postprocessing.py` ink-diff, `preprocessing.py` ROI/alignment) dan
+fallback lokal V12 lama (`FULLPAGE_PROMPT_TEMPLATE`/`_TENOR_RULE`/
+`_SIGNATURE_RULE` di `vlm.py`) -- keduanya di luar scope permintaan user
+sesi ini.
+
+## 9g. V20 — Root-Cause Investigation: "Extraction Collapsed" pada Local Qwen3-VL-4B (SELESAI utk pertanyaan diagnostik utama; mekanisme akar TIDAK sepenuhnya diketahui)
+
+**Scope eksplisit dari user**: fokus HANYA local (`qwen3_vl_local`), TIDAK menyentuh/menguji hosted, TIDAK menghabiskan kredit HF, V18 tetap dibekukan (§9f). Tujuan: cari akar masalah "Extraction Collapsed" (§9f/§20 -- 6/25 dokumen pada run 25-dokumen `qwen3_vl_local` mengembalikan JSON valid tapi SEMUA field inti null) SEBELUM lanjut ke perbaikan akurasi nama/nomor rekening (42%/47%).
+
+**Alat baru**: `diagnose_collapse.py` (root, standalone spt `local_qwen_eval.py` -- TIDAK dipanggil app.py/pipeline manapun). Reimplementasi `_infer_instrumented()` (paralel `vlm._infer`, hanya menambah capture tensor-shape/model-identity/raw-response, TIDAK mengubah `vlm.py`) + harness eksperimen. Failure set (6 dokumen, dari run 25-dokumen V19f): indramayu, pamanukan, situmekar_sukabumi (PDF), reska_cibadak, ngawi, ciamis. Control set (6 dokumen sukses): medan_gatot_subroto, mangga_dua (PDF), muntilan, subang, jakarta_kalideres (PDF), tanjung_tabalong.
+
+**Pertanyaan diagnostik utama dari user**: "Apakah model 4B lokal GAGAL memahami dokumen scr visual, ATAU dia memahami dokumen tapi collapse krn prompt/schema/generation/inference handling?"
+
+### JAWABAN: bukan keduanya -- ini masalah run-to-run non-determinism di level inference runtime, BUKAN dokumen atau prompt.
+
+**CONFIRMED (bukti langsung, direplikasi berkali-kali independen):**
+1. **Model BISA membaca dokumen-dokumen yang collapse ini.** Dikonfirmasi 2 cara: (a) inspeksi visual LANGSUNG thd gambar persis yg dikirim ke model utk `reska_cibadak` -- terbaca jelas 100% oleh mata (nama, nomor rekening, nominal, tenor, tanda tangan semua terlihat) meski hasil model NULL semua; (b) dokumen YANG SAMA, kode YANG SAMA, prompt YANG SAMA berhasil dibaca benar scr KONSISTEN (0 collapse dari puluhan panggilan) di sesi proses yg berbeda.
+2. **Collapse SANGAT reproducible per-DOKUMEN via chain produksi asli** (`extract_direct_semantic_local_majority` -> `_extract_direct_semantic_local_core` -> `vlm._infer`, TIDAK dimodifikasi): 3 replikasi independen (proses baru tiap kali) SEMUA cocok persis pola asli run 25-dokumen -- **6/6 dokumen failure-set collapse lagi, 6/6 dokumen control-set berhasil lagi** (`eval_runs/collapse_diagnosis/real_majority_replication.jsonl`), termasuk 1 replikasi TERISOLASI (`indramayu` SENDIRIAN, proses baru, tanpa dokumen lain sama sekali) yg tetap collapse.
+3. **BUKAN beda kode**: `_infer_instrumented()` (reimplementasi diagnostik) dibandingkan LANGSUNG head-to-head dgn `vlm._infer()` asli, di PROSES & panggilan yg SAMA persis (`indramayu`, 3x berpasangan) -- **raw text output IDENTIK BYTE-FOR-BYTE** tiap pasang (`identical raw text: True` x3), dan KEDUANYA collapse bersamaan di proses itu. Menyingkirkan kemungkinan reimplementasi diagnostik "sengaja"/tidak sengaja beda dari produksi.
+4. **BUKAN akumulasi panggilan dlm 1 proses**: collapse muncul pd panggilan PERTAMA (`indramayu`, cumulative_calls_after=3, yaitu 3 vote dokumen pertama) di proses yg baru dimulai -- tidak ada state "terkumpul" dari dokumen sebelumnya yg mungkin jadi penyebab.
+5. **BUKAN tekanan VRAM semata**: 36 panggilan berurutan (3 pass x 12 dokumen, TERMASUK ke-6 dokumen failure-set) dijalankan sengaja di bawah tekanan memori GPU yg direkonstruksi (~2.96GB bebas, meniru kondisi asli run 25-dokumen yg ~3.1GB bebas krn proses lain) via `eval_runs/_gpu_hog.py` -- **0/36 collapse**, termasuk sebagian pass berjalan setelah hog mati (GPU bebas total 7.9GB). Tekanan memori BUKAN pemicu tunggal/cukup.
+6. **Hasil KONSISTEN dalam 1 proses, TAPI BERBEDA antar proses**: dokumen yg sama, kode yg sama, input yg sama bisa 100% berhasil di satu peluncuran proses dan 100% collapse di peluncuran proses lain -- deterministik SELAMA proses itu hidup, tapi outcome-nya sendiri tidak bisa diprediksi sebelum proses dimulai.
+
+**HYPOTHESIS (belum dikonfirmasi mekanismenya, TAPI konsisten dgn SEMUA temuan di atas)**: non-determinism di level CUDA/kernel bitsandbytes 4-bit -- kemungkinan pemilihan algoritma/kernel (heuristik autotuning cuBLAS/attention-backend) atau urutan reduksi floating-point yg TIDAK stabil antar proses (dipengaruhi state GPU/driver/alokator memori saat load model atau inferensi pertama), yg kemudian "terkunci" utk sisa umur proses itu. Di bawah jalur numerik yg "buruk", sebagian dokumen (dgn konten/dimensi visual yg entah kenapa dekat suatu titik ambang internal) jatuh ke respons default kosong; di jalur numerik yg "baik", dokumen yg SAMA terbaca benar. **Mekanisme PERSIS (kernel/operasi mana yg bertanggung jawab) TIDAK diselidiki lebih lanjut sesi ini** -- perlu profiling level lebih rendah (mis. `CUBLAS_WORKSPACE_CONFIG`/determinism flags, uji tanpa kuantisasi 4-bit/fp16 penuh, `torch.use_deterministic_algorithms`) yg di luar scope sesi ini.
+
+**REJECTED (diuji langsung, terbukti salah/tidak cukup sbg penyebab):**
+- Orientasi/kualitas gambar dokumen -- gambar yg dites terbukti tegak & terbaca jelas scr visual langsung.
+- Kompleksitas prompt/schema sbg penyebab TUNGGAL -- **BELUM diuji formal** via eksperimen A/B prompt-minimal yg direncanakan (lihat "TIDAK dikerjakan" di bawah) krn ditemukan lebih dulu bahwa hasil single-shot TIDAK valid tanpa mengontrol variabel proses ini -- status: **tertunda, bukan rejected**, ditulis terpisah supaya tidak disalahpahami sbg sudah diuji.
+- Akumulasi panggilan berturut-turut dlm 1 proses (memory drift dsb) -- REJECTED, collapse muncul di panggilan pertama proses baru.
+- Tekanan VRAM/kontensi GPU sbg penyebab TUNGGAL/CUKUP -- REJECTED, 36 panggilan di bawah tekanan setara kondisi asli tidak menghasilkan collapse sama sekali.
+- Perbedaan kode antara reimplementasi diagnostik & `vlm._infer` asli -- REJECTED, output identik byte-for-byte saat dibandingkan langsung.
+
+**UNRESOLVED (belum terjawab, perlu kerja lanjutan):**
+- Mekanisme non-determinism level-rendah yg PERSIS (kernel/operasi CUDA mana).
+- KENAPA dokumen SPESIFIK ini (bukan acak) yg jatuh ke collapse dlm proses yg "buruk", sementara yg lain selalu selamat -- apakah terkait `image_grid_thw`/jumlah token gambar tertentu, atau sesuatu lain di konten visualnya? Tidak diuji sesi ini.
+- Apakah hosted engine (`qwen3_vl`) punya masalah serupa -- DI LUAR SCOPE sesi ini (instruksi eksplisit: jangan sentuh/uji hosted, jangan pakai kredit HF).
+- Eksperimen A/B yg direncanakan user (prompt minimal -> progresif, gambar asli vs preprocessed, resolusi lebih tinggi, generation config minimal, plain-text vs JSON) **TIDAK dikerjakan** sesi ini -- desain aslinya (1 percobaan per variabel per dokumen) TIDAK valid lagi setelah temuan non-determinism antar-proses ini ditemukan: satu percobaan single-shot tidak bisa dibedakan dari sekadar "proses ini kebetulan baik/buruk". Eksperimen itu, KALAU mau dilanjutkan, perlu diulang BANYAK kali (proses baru tiap ulangan) per sel matriks utk kesimpulan yg valid scr statistik -- usaha jauh lebih besar dari rencana awal, BELUM disetujui user.
+
+**Rekomendasi (BELUM diimplementasikan, perlu keputusan user)**: krn akar masalah ada di lapisan inference-runtime (bukan prompt/schema), mitigasi paling masuk akal BUKAN prompt yg lebih baik, melainkan salah satu dari: (a) retry di PROSES BARU (bukan sekadar panggilan ulang di proses yg sama -- itu akan mengulang state "buruk" yg sama) saat `extraction_collapsed` terdeteksi -- costly (perlu subprocess/restart model per retry); (b) uji apakah menonaktifkan kuantisasi 4-bit (fp16/bf16 penuh) menghilangkan variabilitas antar-proses ini (belum diuji, VRAM 4B fp16 ~8GB mepet dgn kapasitas GPU 8.19GB sesi ini, risiko OOM); (c) terima sbg keterbatasan reliabilitas jalur lokal 4-bit yg diketahui, cukup andalkan deteksi+badge `extraction_collapsed` (§9f) yg sudah ada utk review manual, tanpa remediasi otomatis. TIDAK ada yg dipilih/dikerjakan sesi ini -- keputusan diserahkan ke user.
+
+**File baru**: `diagnose_collapse.py` (root, standalone, infrastruktur eksperimen msh valid utk dipakai kalau mau lanjut dgn desain "banyak ulangan per sel"), `eval_runs/_gpu_hog.py` (scratch, alat uji tekanan VRAM), `eval_runs/collapse_diagnosis/*.jsonl` (bukti mentah semua run).
+**TIDAK disentuh sesi ini**: hosted engine (`qwen3_vl`, sesuai instruksi eksplisit), V18 (`pipeline.py`/`preprocessing.py`/`postprocessing.py`, tetap dibekukan §9f), identity-block crop / perbaikan akurasi nama-rekening (ditunda sampai pertanyaan collapse ini selesai, sesuai instruksi eksplisit user).
+
+## 9h. V20 — Live Evaluation Feature di Record Table (SELESAI, terverifikasi end-to-end nyata)
+
+Tombol "Evaluasi" baru di toolbar Record Table (Tab 2) yang membuka modal berisi metrik agregat (accuracy/precision/recall/F1 per field, confusion matrix utk field kategorikal, statistik runtime, statistik Extraction Collapsed) dari record yang SUDAH diproses pada sesi berjalan -- TIDAK PERNAH menjalankan OCR/VLM ulang.
+
+**Arsitektur:**
+- `_SESSIONS[session_id]["results"]` (in-memory, `app.py`) SUDAH secara alami menyimpan HANYA hasil TERBARU per record_no (rerun menimpa di tempat, `app.py:481-482` -- record hanya masuk `results` setelah `status` jadi `"done"`, gagal/cancelled TIDAK pernah masuk `results`). Ini berarti `len(session["results"])` SUDAH PERSIS "unique records dgn hasil valid terbaru" -- tidak perlu bookkeeping baru sama sekali utk hitungan ini.
+- `_process_one_record` (`app.py:448-497`) adalah SATU funnel utk single run/bulk run/index-range run/rerun -- semua otomatis konsisten lewat titik ini.
+
+**Perubahan kode:**
+- `app.py` `_run_ocr_and_format`: tambah `t0 = time.monotonic()` di awal fungsi + `processing_time_seconds` (round 3 desimal) di dict hasil, sebelum `return` -- SATU-SATUNYA perubahan pada fungsi ini, murni instrumentasi waktu, TIDAK mengubah logika ekstraksi/comparison/decision apa pun.
+- `live_evaluation.py` (BARU, root, mengimpor HANYA `comparison`+`extractors`, TIDAK mengimpor `app.py`): `build_session_evaluation(session)` -- satu-satunya entry point, dipanggil endpoint baru. Menggunakan ULANG `match`/`ocr_result`/`data_entry`/`status` yang SUDAH dihitung `comparison.attach_data_entry` saat proses (bukan re-derive dari nol).
+- `app.py`: endpoint baru `GET /api/sheet/evaluation/{session_id}` (antara `sheet_result` dan `sheet_export`), pure read, 404 kalau sesi tidak ada (format error SAMA dgn endpoint sheet lain).
+- `static/index.html`: tombol `#sheetEvalBtn` baru di toolbar Record Table (setelah grup Export Excel); modal pertama di codebase ini (`#evalModalBackdrop`/`.eval-modal-card`, overlay `position:fixed` + dim backdrop) -- HANYA memakai token visual yang SUDAH ada (font Segoe UI, biru `#2563eb`, radius/shadow `.workspace-block`, warna badge hijau/merah/abu yang sudah ada) -- TIDAK ada palet baru, TIDAK ada library chart baru.
+
+**Field yang dievaluasi (Akurasi per Field) -- HANYA 5 field yang punya ground truth nyata** (`comparison.COLUMN_FIELD_MAP`): `nama_nasabah`, `nomor_rekening`, `nominal_penempatan`, `tenor_penempatan`, `bentuk_reward`. `unit_kerja_pengelola_rekening` TIDAK PERNAH punya kolom GT di skema manapun -- dikecualikan total, bukan alpa.
+
+**Definisi metrik:**
+- Accuracy per field = matched/measurable, dari `match` yang SUDAH dihitung `attach_data_entry` saat proses (`True`=matched, `False`=mismatched, `None`=tidak measurable/dilewati). `match=="uncertain"` (HANYA `nama_nasabah`, fuzzy-match state ke-3) DIKECUALIKAN dari numerator MAUPUN denominator accuracy -- dilaporkan terpisah sbg `uncertain_rate` ("jangan anggap GT yang belum pasti sbg salah").
+- Precision/Recall/F1 HANYA valid utk `tenor_penempatan` (kelas `{1,3,6}`) dan `bentuk_reward` (kelas `{tunai,non_tunai}`) -- satu-satunya field kategorikal dgn kelas tetap. 3 field teks/angka lain SELALU `"N/A"` utk kolom ini (tidak pernah diisi angka karangan).
+- `overall.accuracy` = rata-rata (unweighted) accuracy dari SEMUA field yang measurable >=1. `overall.precision_macro/recall_macro/f1_macro` = rata-rata HANYA dari macro-score `tenor_penempatan` dan `bentuk_reward` sendiri -- accuracy 3 field teks TIDAK PERNAH ikut dirata-rata ke sini atau menggantikan P/R/F1 yang tidak ada (keputusan eksplisit user).
+- Runtime = `processing_time_seconds` (per DOKUMEN, bukan per field) dari `time.monotonic()` yang membungkus SELURUH `_run_ocr_and_format` (ekstraksi + simpan gambar debug + comparison/decision). Hasil lama (sebelum fitur ini ada) yang belum punya field ini otomatis dilewati (`isinstance` guard), TIDAK di-nol-kan/crash.
+- `extraction_collapsed` = pakai ULANG `extractors._is_extraction_collapsed()`/`ocr_meta["extraction_collapsed"]` APA ADANYA -- TIDAK ada definisi kedua.
+
+**Confusion matrix -- Tenor & Bentuk Reward (GT nyata):** dibangun dari `ocr_result`/`data_entry` mentah tiap row (sudah tersimpan), dinormalisasi ULANG lewat `comparison._normalize_for_compare()` (fungsi yang SAMA dipakai `attach_data_entry`, bukan reimplementasi) ke kelas tertutup; record yang salah satu sisinya di luar kelas valid (kosong/tak terbaca) DIKECUALIKAN dari matrix, bukan dihitung sbg kelas salah.
+
+**Confusion matrix -- TTD Nasabah & TTD BRI (GT PENDEKATAN/SEMENTARA, keputusan eksplisit user):** tidak ada kolom GT terstruktur utk signature di skema manapun. Atas permintaan user ("pakai kolom verif dulu, dataset proper menyusul"), `live_evaluation._derive_signature_gt_from_verification()` membaca kolom teks bebas `"Status Verifikasi Form Pendaftaran Nasabah"` scr KONSERVATIF: teks berawalan "ok" -> kedua TTD GT="present"; TTD spesifik hanya diklaim "absent" kalau teks EKSPLISIT menyebutnya hilang (regex "ttd/tanda tangan ... nasabah" / "... bri/unit kerja" + "tidak ada"); selain itu GT=None (dikecualikan, TIDAK PERNAH ditebak). Diverifikasi thd data nyata (`assets/ocr_evaluation.xlsx`, 4 nilai unik kolom ini): "OK, Lanjut Proses" -> present/present; "Tolak, Tidak Ada Tanda Tangan Pihak BRI" -> atasan=absent, nasabah=None; "Tolak, Tunai/Non Tunai?" (tanpa sebut TTD) -> keduanya None. **Ini PENDEKATAN, BUKAN dataset per-signature yang sebenarnya** -- caption di modal & di sini menyatakan ini eksplisit. Kolom tidak ada di sheet upload lain -> matrix otomatis `"available": false`, tidak fabrikasi.
+
+**CTA enable/disable:** `updateEvalButtonState()` (`sheetEvalBtn.disabled = !Object.values(batchStatus).some(s => s === "done")`), dipanggil dari 2 titik yang SUDAH ADA (`updateStatusCells()` -- tiap poll tick + sesudah rerun; `renderSheetTable()` -- saat sesi baru DAN saat restore dari localStorage) -- menutupi semua skenario wajib (single/bulk/index-range run, rerun, sesi dipulihkan) tanpa wiring baru per aksi. Record yang cuma "loaded" (belum diproses, status `pending`/`queued`) TIDAK PERNAH mengaktifkan tombol.
+
+**API contract:** `GET /api/sheet/evaluation/{session_id}` -> 404 `{"error":...}` kalau sesi tak ada, else objek dgn keys `engine`/`engine_label`/`documents_evaluated`/`documents_total`/`overall`/`field_accuracy`/`confusion_matrices`/`runtime`/`extraction_collapsed`. Sesi 0-record diproses -> bentuk sama, semua angka `"N/A"`/0 (bukan cabang khusus di kode -- setiap helper degradasi alami dgn list kosong).
+
+**Test yang BENAR-BENAR dijalankan (bukan rencana):**
+1. Modul `live_evaluation.py` diuji unit dgn 4 record sintetis (match/mismatch/uncertain/collapsed campuran) -- semua angka (accuracy per field, confusion matrix, macro P/R/F1, overall) dicocokkan manual dgn hitungan tangan, SEMUA cocok persis.
+2. Server dijalankan nyata (`uvicorn app:app`), upload `assets/ocr_evaluation.xlsx` via `/api/sheet/upload` -> `GET /api/sheet/evaluation/{id}` sblm proses apa pun -> `documents_evaluated: 0`, bentuk lengkap `"N/A"`, TIDAK error.
+3. `POST /api/sheet/submit` dgn `engine="v18"` -> GAGAL (`AttributeError: partially initialized module 'paddle'...`) -- **bug lingkungan PaddleX/paddle circular-import PRE-EXISTING, TIDAK terkait perubahan sesi ini** (traceback murni di dalam `paddlex`/`paddle` internal, V18 sendiri dibekukan §9f & tidak disentuh). Dikonfirmasi: record error TIDAK masuk `session["results"]`, `documents_evaluated` TETAP 0 -- jalur pengecualian record gagal bekerja benar.
+4. Restart server bersih, proses 1 record nyata dgn `engine="qwen3_vl_local"` (~97 detik) -> `GET /api/sheet/evaluation/{id}` mengembalikan `documents_evaluated:1`, `engine_label` dari `extractors.ENGINE_LABELS` (bukan hardcode), `runtime.average_seconds:96.765` (timing instrumentasi baru TERBUKTI jalan), confusion matrix TTD terisi dari heuristik verifikasi (record ini "OK, Lanjut Proses" -> present/present, cocok dgn prediksi -> akurasi 1.0).
+5. Rerun record yang sama -> `documents_evaluated` TETAP 1 (bukan 2), `runtime.average_seconds` berubah ke `74.64` (run baru) -- perilaku "hasil terbaru menggantikan, jumlah tidak bertambah" terkonfirmasi NYATA, bukan cuma dianalisis dari kode.
+6. Fungsi render modal (`renderEvaluationModal`/`renderEvalConfusionMatrix`) diekstrak & dijalankan via Node.js langsung thd response API NYATA dari test #4 -- HTML yang dihasilkan diperiksa: tidak ada `"undefined"`/`"NaN"` bocor, semua 4 confusion matrix + tabel per-field + runtime + extraction status ter-render lengkap.
+7. `node --check` thd seluruh `<script>` block -- sintaks JS valid.
+8. `python -m py_compile app.py live_evaluation.py extractors.py comparison.py` -- semua valid.
+
+**BELUM diuji (keterbatasan sesi ini, bukan diklaim selesai):** klik tombol sungguhan di browser asli (Chrome tool ditolak user sesi ini) -- verifikasi UI dilakukan via ekstraksi+eksekusi Node thd fungsi render yang SAMA persis, bukan screenshot visual nyata. Skenario "proses 3 lagi jadi 4", "sesi baru mereset ke 0", dan "restore session" TIDAK diuji live (mekanismenya identik dgn yang SUDAH diuji nyata di atas -- `len(dict)` Python & `batchStatus` yang sama -- tapi belum di-observasi langsung).
+
+**File berubah:** `app.py`, `live_evaluation.py` (baru), `static/index.html`. **TIDAK disentuh:** `comparison.py`/`extractors.py` (dipakai ulang, bukan dimodifikasi), V18/ROI/preprocessing, logika Qwen/hosted, threshold comparison, fallback logic.
+
+## 9i. V20 — Hybrid Engine "qwen3_vl_local_yolos" (Qwen3-VL Local + YOLOS Signature Detector) (SELESAI, DIVERIFIKASI NYATA thd bobot yg benar-benar berjalan lokal)
+
+Engine BARU, ADDITIVE thd `qwen3_vl_local` (TIDAK diubah/diganti sama sekali) -- id `qwen3_vl_local_yolos`, label `"Qwen3-VL Local + YOLOS Signature"`. Tujuan: Qwen3-VL Local tetap membaca SEMUA field semantik (nama/rekening/unit kerja/nominal/tenor/reward), tapi `signature_nasabah`/`signature_atasan` diambil dari detektor objek lokal (YOLOS) sbg sumber OTORITATIF, bukan penilaian Qwen sendiri -- utk kerahasiaan dokumen (tanda tangan tidak boleh lewat jalur model apa pun yg BISA menyentuh infrastruktur hosted) dan perbandingan akurasi vs `qwen3_vl_local` polos.
+
+**Riwayat vendor (penting utk konteks, bukan lagi arsitektur aktif)**: target awal sesi ini adalah `tech4humans/yolov8s-signature-detector` (YOLOv8s via `ultralytics`), TAPI repo HF-nya **GATED** -- `hf_hub_download` gagal dgn `GatedRepoError` (401) MESKI dgn `HF_TOKEN` valid, mewajibkan user login manual di huggingface.co dan menyetujui akses via browser, TIDAK BISA lewat API/skrip apa pun. User diberi pilihan (AskUserQuestion): tunggu approval manual, ATAU cari alternatif non-gated. **User memilih alternatif** ("Look for an alternative non-gated source instead"), lalu dari kandidat yg ditemukan (web research sesi ini), user memilih scr eksplisit **`mdefrance/yolos-tiny-signature-detection`** ("Swap to mdefrance/yolos-tiny-signature-detection -- Recommended"). Ini vendor & arsitektur BERBEDA (YOLOS/ViT via `transformers`, BUKAN YOLOv8/ultralytics) -- semua penamaan "Tech4Humans" di kode/env/UI diganti total ke penamaan generik (`signature_detector.py`, `SIGNATURE_DETECTOR_*`) supaya tidak salah merepresentasikan sumbernya. Modul lama `tech4humans.py` **DIHAPUS**, bukan disimpan berdampingan.
+
+**Arsitektur:**
+```
+Dokumen
+  |
+  +-- Qwen3-VL Local (vlm.extract_direct_semantic_local, SATU panggilan,
+  |   BUKAN _majority -- skip 3x vote sinyal tanda tangan sepenuhnya)
+  |     -> nama/rekening/unit_kerja/nominal/tenor/reward
+  |
+  +-- YOLOS signature detector (signature_detector.detect_signatures, HANYA
+      dokumen, TANPA template) -> deteksi bbox+confidence
+        -> extractors._assign_signature_roles (geometri SIGNATURE_CONFIG
+           yg SUDAH ada, kiri=nasabah/kanan=atasan) -> signature_nasabah/atasan
+  |
+  v
+common schema (extractors._adapt_qwen_to_common, override 2 baris signature
+SAJA) -> adapt_common_to_pipeline_shape (TIDAK diubah) -> comparison.py
+(TIDAK diubah) -> keputusan akhir
+```
+
+**Hard local-only gate (kerahasiaan dokumen)**: `extractors._hybrid_readiness()` mengecek DUA dependency LOKAL SEBELUM apa pun lain dijalankan (baris PERTAMA `run_qwen3_vl_local_yolos`, sebelum `_qwen_prepare_image` sekalipun): `vlm._resolve_model_path()` (Qwen lokal) dan `signature_detector.is_ready()` (YOLOS). Kalau salah satu `"blocked"`, `ExtractorError` (stage `"API_AUTH"`) langsung dilempar dgn pesan PERSIS yg diminta user -- TIDAK PERNAH Qwen jalan dulu baru gagal belakangan. Diverifikasi NYATA DUA KALI: sekali thd modul lama (`tech4humans.py`, sblm dihapus) dan sekali lagi thd `signature_detector.py` setelah swap (path model sengaja dikosongkan -> `ExtractorError` langsung, dokumen TIDAK sempat diproses).
+
+Kode engine ini TIDAK PERNAH mengimpor/memanggil apa pun yg menyentuh HF hosted inference, Gemini, atau API manapun -- `signature_detector.py`'s satu-satunya titik yg menyentuh file model adalah `AutoImageProcessor.from_pretrained(local_dir)`/`AutoModelForObjectDetection.from_pretrained(local_dir)` dgn `local_dir` berupa PATH LOKAL (bukan repo id), yg dikonfirmasi tidak pernah menghubungi jaringan.
+
+**Model YOLOS**: `mdefrance/yolos-tiny-signature-detection` di Hugging Face Hub -- **TIDAK gated**, lisensi **Apache-2.0** (lebih permisif dari AGPL-3.0 Tech4Humans), arsitektur YOLOS (ViT-based object detector) single-class (`"signature"`), diakses via `transformers.AutoImageProcessor`/`AutoModelForObjectDetection` -- API yg SAMA persis yg SUDAH jadi dependency wajib project ini utk Qwen, jadi **NOL dependency pip baru** (beda dgn upaya Tech4Humans/`ultralytics` sebelumnya). Bobot diunduh SATU KALI sesi ini via `from_pretrained(repo_id)` lalu `.save_pretrained("models/yolos-tiny-signature-detection/")` (konvensi penyimpanan sama spt `models/Qwen3-VL-4B-Instruct/`, gitignored) -- langkah manual satu kali, BUKAN sesuatu yg dijalankan runtime code. Path default `models/yolos-tiny-signature-detection/`, override via `SIGNATURE_DETECTOR_MODEL_PATH` (nama generik, bukan nama vendor, krn detektor mungkin berganti lagi nanti -- sama spt `vlm.py`'s `VLM_MODEL_PATH`).
+
+**Dependency**: TIDAK ADA yg baru. Blok `ultralytics` yg sempat ditambahkan ke `requirements.txt` utk upaya Tech4Humans DIHAPUS (diganti komentar penjelasan riwayat + peringatan eksplisit "Do not reintroduce `ultralytics` without re-reading handover.md's V20 section first" -- mencegah pengulangan insiden bentrok `opencv-python`/`opencv-python-headless` yg sempat nyata merusak instalasi `cv2` sesi ini sebelum diperbaiki). Paket `ultralytics` & dependency eksklusifnya di-uninstall dari environment supaya cocok dgn `requirements.txt` yg sudah diperbarui.
+
+**Signature role assignment (geometri yg SUDAH ADA, BUKAN sistem ROI baru, TIDAK berubah dari upaya Tech4Humans)**: `extractors._assign_signature_roles()` memakai `preprocessing.SIGNATURE_CONFIG`'s `value_bbox` (nasabah x∈[0.1678,0.4530], atasan x∈[0.5872,0.8305], y∈[0.7981,0.8622] sama utk keduanya) sbg GERBANG REGION LONGGAR (margin x=0.06, y=0.08) thd gambar hasil `_qwen_prepare_image` (HANYA EXIF+rotasi kasar, TANPA perspective warp) -- BUKAN crop presisi piksel. Deteksi dgn confidence tertinggi per region dipilih; kalau tidak ada deteksi di region manapun -> `absent` (confidence=None, TIDAK ditebak). Logika ini detector-agnostic dan TIDAK disentuh sama sekali saat swap vendor.
+
+**Status/confidence logic (DUA threshold terpisah)**: (1) `SIGNATURE_DETECTOR_CONF_THRESHOLD` (default 0.25) -- threshold PROPOSAL deteksi YOLOS sendiri, dipakai `signature_detector.detect_signatures()`'s `processor.post_process_object_detection(outputs, threshold=conf, ...)`; (2) begitu ada deteksi, confidence-nya diteruskan APA ADANYA ke `extractors._signature_state()` yg SUDAH ADA (threshold 0.6) -- TIDAK ADA threshold "final" baru diciptakan sesi ini. **0.25 HANYA spot-checked thd SATU dokumen nyata sesi ini** (lihat Validasi #4) -- belum ditera thd sampel lebih besar.
+
+**Qwen 3x signature vote**: DI-SKIP SEPENUHNYA utk engine ini -- `run_qwen3_vl_local_yolos` memanggil `vlm.extract_direct_semantic_local()` (single-call) bukan `extract_direct_semantic_local_majority()`, krn jawaban tanda tangan Qwen toh akan ditimpa YOLOS. Jawaban tanda tangan Qwen sendiri TETAP disimpan sbg diagnostik (`ocr_meta["qwen_raw_signature_diagnostic"]`), TIDAK PERNAH jadi hasil akhir.
+
+**Extraction Collapsed**: TIDAK diubah -- `extractors._is_extraction_collapsed(qwen_result)` dipanggil PERSIS spt engine lain, thd `qwen_result` SEBELUM override sinyal tanda tangan (fungsi ini HANYA baca 5 field semantik inti). Skenario "semantik collapsed TAPI tanda tangan present" valid & didukung.
+
+**Evaluation compatibility**: `live_evaluation.py` **TIDAK disentuh sama sekali** -- `_engine_info()` sudah generik (baca string id engine APA PUN dari hasil tersimpan), dikonfirmasi NYATA DUA KALI sesi ini (sekali sblm swap dgn id `qwen3_vl_local_tech4humans`, sekali lagi setelah swap dgn id final `qwen3_vl_local_yolos` lewat sesi live server sungguhan): `GET /api/sheet/evaluation/{id}` melaporkan `engine: "qwen3_vl_local_yolos"` scr independen dari `qwen3_vl_local`, tanpa satu baris pun kode `live_evaluation.py` berubah.
+
+**File berubah**: `extractors.py` (`ENGINE_LABELS`, `run()` dispatch, `_hybrid_readiness`, `_assign_signature_roles`, `run_qwen3_vl_local_yolos`), `signature_detector.py` (BARU, menggantikan `tech4humans.py` yg DIHAPUS), `requirements.txt` (blok `ultralytics` dihapus, komentar riwayat ditambahkan), `.env.example` (`TECH4HUMANS_*` diganti `SIGNATURE_DETECTOR_MODEL_PATH`/`SIGNATURE_DETECTOR_CONF_THRESHOLD`), `static/index.html` (opsi dropdown di KEDUA Tab 1 & Tab 2 diganti nama final), `models/yolos-tiny-signature-detection/` (bobot BARU, diunduh nyata). **TIDAK disentuh**: `qwen3_vl_local` (fungsi lamanya, byte-for-byte sama), V18, Gemini, Qwen hosted, `comparison.py`, `live_evaluation.py`, `preprocessing.py`/`postprocessing.py`, `app.py`.
+
+**Validasi yg BENAR-BENAR dijalankan (server/proses nyata, bukan rencana, TANPA mocking utk bagian ini):**
+1. `python -m py_compile app.py extractors.py signature_detector.py vlm.py comparison.py live_evaluation.py` -- semua valid.
+2. Bobot `mdefrance/yolos-tiny-signature-detection` diunduh NYATA (repo memang tidak gated, berhasil tanpa hambatan) dan disimpan ke `models/yolos-tiny-signature-detection/`.
+3. Hard local-only gate diuji ulang dgn `signature_detector.py`: path model dikosongkan/tidak ada -> `is_ready()` -> `False` dgn pesan jelas; `extractors.run("qwen3_vl_local_yolos", ...)` LANGSUNG melempar `ExtractorError` (stage `API_AUTH`), TIDAK ada dokumen yg sempat diproses.
+4. **Uji end-to-end NYATA, ZERO mocking** thd dokumen nyata: `signature_detector.detect_signatures()` dijalankan APA ADANYA (kode produksi persis) thd gambar dokumen asli -- menghasilkan **5 deteksi nyata** dgn confidence bervariasi (termasuk satu kasus tepi yg jatuh sedikit DI LUAR margin y region tanda tangan -- dgn sengaja DITOLAK oleh gerbang region, bukti gerbang region bekerja thd data nyata bukan cuma sintetis). `run_qwen3_vl_local_yolos` penuh dijalankan thd dokumen yg sama dgn Qwen3-VL Local ASLI (bukan mock): **field semantik IDENTIK 100%** (`SEMANTIC MATCH: True`) dgn `qwen3_vl_local` polos pd dokumen yg SAMA; `signature_nasabah`/`signature_atasan` keduanya `"present"` dgn confidence NYATA dari YOLOS (nasabah 0.9586, atasan 0.9962) -- BEDA dari confidence self-rated Qwen di `qwen_raw_signature_diagnostic`, membuktikan override BENAR-BENAR terjadi dari deteksi objek nyata, bukan kebetulan cocok.
+5. **Sesi live via server FastAPI sungguhan** (upload `assets/ocr_evaluation.xlsx`, submit record 1 dgn `engine=qwen3_vl_local_yolos` lewat `POST /api/sheet/submit`, poll `GET /api/sheet/batch-status` sampai selesai): record selesai `status=done` dlm 47.016 detik, `signature_nasabah`/`signature_atasan` keduanya `"present"`; `GET /api/sheet/evaluation/{id}` mengonfirmasi `documents_evaluated: 1` dan `engine: "qwen3_vl_local_yolos"` / `engine_label: "Qwen3-VL Local + YOLOS Signature"` scr independen, tanpa perubahan kode `live_evaluation.py`.
+6. `ENGINE_LABELS`/`ENGINES` dikonfirmasi memuat id final; opsi dropdown dikonfirmasi muncul persis 2x (Tab 1 & Tab 2) dgn label final di `static/index.html`.
+7. Environment dibersihkan: `ultralytics` & dependency eksklusifnya di-uninstall, `models/tech4humans-yolov8s-signature-detector/` (placeholder kosong) dihapus.
+
+**BELUM diuji / keterbatasan diketahui (JANGAN dianggap selesai):**
+- Margin region (0.06/0.08) hanya diamati thd SATU dokumen nyata (5 deteksi, termasuk 1 kasus tepi di luar margin) -- belum ditera thd sampel lebih besar utk memastikan margin tidak memotong tanda tangan asli atau meloloskan noise di dekat tepi region.
+- `SIGNATURE_DETECTOR_CONF_THRESHOLD=0.25` default HANYA spot-checked thd satu dokumen -- belum divalidasi thd sampel lebih besar/variasi kualitas scan.
+- Skenario "area kosong -> BUKAN false present" dan "kasus ambigu -> uncertain" thd dokumen tanpa tanda tangan sungguhan belum diuji nyata sesi ini -- baru dokumen DENGAN tanda tangan jelas yg diuji end-to-end.
+- Bulk/Index-Range run & rerun utk engine baru ini pakai jalur `_process_batch`/`_process_one_record` yg SAMA persis dgn engine lain (tidak ada percabangan khusus di `app.py`) -- secara desain otomatis berfungsi, TAPI belum di-klik-coba scr manual lewat UI (Chrome tool ditolak user sesi lalu, sama spt fitur Live Evaluation sebelumnya) atau lewat batch >1 dokumen via API.
+
 ## 10. Prioritas Berikutnya (berdasar data V15.2/V17/V18 di atas, BUKAN tebakan)
+
+**CATATAN V19f (§9f): V18 DIBEKUKAN** -- semua item di bawah ini adalah
+perubahan internal V18/preprocessing/ROI, dan TIDAK BOLEH dikerjakan
+sampai user secara eksplisit meminta lagi. Dibiarkan di bawah sbg catatan
+riwayat/rencana, bukan instruksi aktif.
 
 1. **Section B recovery, SEBAGIAN sudah selesai lewat V16 (§6)** — record
    7/24 (`nama_nasabah`, kontaminasi JUDUL) SUDAH fix lewat token-level

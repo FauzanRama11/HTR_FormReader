@@ -13,10 +13,18 @@ import cv2
 from PIL import Image
 
 BASE_DIR = Path(__file__).resolve().parent
+# V19f: "Qwen3-VL-2B-Instruct" never actually existed under models/ (only
+# Qwen2-VL-2B-Instruct and Qwen3-VL-4B-Instruct do) -- listing it first meant
+# _resolve_model_path() always fell through to the old Qwen2-VL-2B-Instruct,
+# silently ignoring the 4B model the module comment above
+# extract_direct_semantic_local() documents as the one actually re-verified
+# on real hardware (RTX 4060 Laptop, 8.6GB VRAM). Fixed to try the validated
+# 4B model first, falling back to Qwen2-VL-2B-Instruct on machines that don't
+# have the 4B weights downloaded.
 DEFAULT_LOCAL_CANDIDATES = [
-    BASE_DIR / "models" / "Qwen3-VL-2B-Instruct",
+    BASE_DIR / "models" / "Qwen3-VL-4B-Instruct",
     BASE_DIR / "models" / "Qwen2-VL-2B-Instruct",
-    Path("C:/models/Qwen3-VL-2B-Instruct"),
+    Path("C:/models/Qwen3-VL-4B-Instruct"),
     Path("C:/models/Qwen2-VL-2B-Instruct"),
     Path("/models/Qwen2-VL-2B-Instruct"),
 ]
@@ -65,6 +73,17 @@ HOSTED_MAX_SIDE_FULL = int(os.environ.get("HF_MAX_SIDE_FULL", "1600"))
 # spot a real signature" rather than a tie-breaking count.
 HOSTED_SIGNATURE_VOTE_COUNT = int(os.environ.get("HF_SIGNATURE_VOTE_COUNT", "3"))
 
+# V19f: local counterpart of HOSTED_SIGNATURE_VOTE_COUNT above, now ON BY
+# DEFAULT (default "3", explicit user decision) -- the local/hosted
+# independence policy that previously kept local at a single deterministic
+# call (handover.md SS9e: ">5 minutes for 1 call, 3x tidak masuk akal") was a
+# timing tradeoff measured on a 2GB-VRAM MX230 GPU running the old 2B model;
+# it does not hold on the hardware the 4B model was re-verified on (~22-26s/
+# doc, see the comment above extract_direct_semantic_local), where 3x calls
+# cost roughly a minute per document. Set to 1 to restore the old
+# single-call behavior on slower local hardware.
+LOCAL_SIGNATURE_VOTE_COUNT = int(os.environ.get("VLM_SIGNATURE_VOTE_COUNT", "3"))
+
 if OFFLINE:
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -86,9 +105,9 @@ def _resolve_model_path():
         if p.exists():
             return str(p)
     if not OFFLINE:
-        return "Qwen/Qwen2-VL-2B-Instruct"
+        return "Qwen/Qwen3-VL-4B-Instruct"
     raise RuntimeError(
-        "Model VLM lokal tidak ditemukan. Set VLM_MODEL_PATH ke folder Qwen2-VL/Qwen2.5-VL lokal."
+        "Model VLM lokal tidak ditemukan. Set VLM_MODEL_PATH ke folder Qwen3-VL/Qwen2-VL lokal."
     )
 
 
@@ -537,6 +556,43 @@ def _coerce_signature_bool(raw_value):
 _ALLOWED_DIRECT_SEMANTIC_STATUSES = {"detected", "uncertain", "not_detected"}
 _DIRECT_SEMANTIC_SIGNATURE_FIELDS = ("signature_nasabah", "signature_bri")
 
+_TENOR_PENEMPATAN_ALLOWED = {"1", "3", "6"}
+_BENTUK_REWARD_ALLOWED = {"tunai", "non_tunai"}
+
+
+def _canonicalize_tenor_penempatan(raw_value):
+    """V19f: minimal cleanup only -- strip whitespace/unit words ("bulan"/
+    "hari") and any non-digit characters, keep the result only if it lands
+    in the closed set {"1","3","6"} DIRECT_SEMANTIC_PROMPT actually asks
+    for. Returns None otherwise (deliberately NOT a full lexical fold --
+    comparison.py's own tenor normalization already strips non-digits
+    again downstream; this only exists to stop a near-miss answer like
+    "3 bulan" from vanishing to None two hops earlier, in extractors.
+    _adapt_qwen_to_common's bare int() cast, before comparison.py ever
+    gets a chance to run on it)."""
+    text = re.sub(r"(?i)bulan|hari", "", str(raw_value)).strip()
+    digits = re.sub(r"\D", "", text)
+    return digits if digits in _TENOR_PENEMPATAN_ALLOWED else None
+
+
+def _canonicalize_bentuk_reward(raw_value):
+    """V19f: minimal cleanup only -- casefold and normalize whitespace/
+    dashes to underscore ("non tunai"/"non-tunai" -> "non_tunai"), keep
+    the result only if it lands in the closed set {"tunai","non_tunai"}
+    DIRECT_SEMANTIC_PROMPT actually asks for. Returns None otherwise --
+    broader lexical variants (e.g. "cash" -> "tunai") are deliberately
+    NOT folded here, to avoid a second, divergent copy of comparison.
+    _normalize_for_compare's own "choice" fold list; that function still
+    runs downstream and does the heavier variant-matching work."""
+    text = re.sub(r"[\s-]+", "_", str(raw_value).strip().lower())
+    return text if text in _BENTUK_REWARD_ALLOWED else None
+
+
+_DIRECT_SEMANTIC_CANONICALIZERS = {
+    "tenor_penempatan": _canonicalize_tenor_penempatan,
+    "bentuk_reward": _canonicalize_bentuk_reward,
+}
+
 
 def _parse_direct_semantic_json(data):
     """Parsing for the DIRECT_SEMANTIC contract's response JSON, used by
@@ -549,7 +605,15 @@ def _parse_direct_semantic_json(data):
     self-reported 0.0-1.0 confidence -- a small VLM making a categorical
     judgment call tends to be more reliable than it self-rating a
     continuous score, and this now matches the shape every other engine's
-    canonical dict already provides."""
+    canonical dict already provides.
+
+    V19f: tenor_penempatan/bentuk_reward additionally go through a minimal
+    canonicalizer (see _DIRECT_SEMANTIC_CANONICALIZERS) -- previously a
+    near-miss model answer (e.g. "3 bulan", "non tunai" with a space) was
+    passed through unchanged and silently discarded to None two hops
+    downstream (extractors._adapt_qwen_to_common's bare int() cast / exact-
+    tuple membership check), before comparison.py's own, already-tested
+    normalization ever got a chance to run on the real value."""
     clean = {}
     for f in DIRECT_SEMANTIC_FIELDS:
         item = data.get(f)
@@ -562,6 +626,21 @@ def _parse_direct_semantic_json(data):
 
         value = raw_value if raw_value not in ("", None) else None
         status = item.get("status") if isinstance(item, dict) else None
+
+        canonicalizer = _DIRECT_SEMANTIC_CANONICALIZERS.get(f)
+        if canonicalizer is not None and value is not None:
+            canonical = canonicalizer(value)
+            if canonical is None:
+                # The model answered SOMETHING, just not one of the exact
+                # values the prompt asks for -- surface that honestly as
+                # "uncertain" (it saw something, couldn't confirm a clean
+                # match) rather than silently passing the raw string
+                # through to fail an exact-match comparison invisibly.
+                value = None
+                status = "uncertain"
+            else:
+                value = canonical
+
         if status not in _ALLOWED_DIRECT_SEMANTIC_STATUSES:
             # Model answered with a flat scalar, or an invalid/missing
             # status -- tolerate it (same defensive pattern as
@@ -571,6 +650,44 @@ def _parse_direct_semantic_json(data):
             status = "not_detected" if value is None else "detected"
         clean[f] = {"value": value, "status": status}
     return clean
+
+
+_VOTED_SIGNATURE_FIELDS = ("signature_nasabah", "signature_bri")
+
+
+def _aggregate_signature_votes(runs_clean, fields=None):
+    """Lenient (ANY vote "present" wins) aggregation over N independent
+    extract_direct_semantic_*() calls' clean dicts, for the vote-prone
+    signature fields only (see HOSTED_SIGNATURE_VOTE_COUNT/
+    LOCAL_SIGNATURE_VOTE_COUNT above for why only these two fields get
+    re-voted). V19f: factored out of extract_direct_semantic_hosted_majority
+    so extract_direct_semantic_local_majority can reuse the EXACT same
+    aggregation policy -- keeping it in one place means the two engines'
+    voting behavior cannot silently drift apart.
+
+    `runs_clean`: list of clean dicts (each already parsed via
+    _parse_direct_semantic_json). Returns (aggregated, signature_votes):
+    `aggregated` is {field: {"value": bool, "confidence": float}}, ready to
+    merge into whichever run's clean dict the caller keeps as the base;
+    `signature_votes` is {field: [bool, ...]} (every run's raw value) for
+    full transparency into what each individual run answered."""
+    fields = fields or _VOTED_SIGNATURE_FIELDS
+    aggregated = {}
+    signature_votes = {}
+    for field in fields:
+        values = [c[field]["value"] for c in runs_clean]
+        confidences = [c[field]["confidence"] for c in runs_clean]
+        signature_votes[field] = values
+        # LENIENT aggregation (explicit user policy): absence should be the
+        # harder conclusion to reach -- ANY vote saying "present" is enough
+        # to call it present; "absent" requires EVERY vote to agree nothing
+        # is there. Deliberately NOT a strict majority (that would still let
+        # 2-out-of-3 "absent" votes override a single correct "present").
+        aggregated[field] = {
+            "value": any(values),
+            "confidence": sum(confidences) / len(confidences),
+        }
+    return aggregated, signature_votes
 
 
 # ============================================================================
@@ -630,6 +747,43 @@ def _parse_direct_semantic_json(data):
 # fixed, matching what the hosted path already does for the same reason.
 
 
+def _extract_direct_semantic_local_core(image_bgr, max_new_tokens=None):
+    """Single local inference call + parse ONLY -- template+document images
+    through _infer()/_parse_direct_semantic_json, with NO reward-detail
+    follow-up attached (see extract_direct_semantic_local and
+    extract_direct_semantic_local_majority below, both of which wrap this).
+    Split out in V19f so the majority-vote wrapper can call just this part
+    `votes` times without also repeating the reward-detail follow-up call
+    `votes` times (that follow-up only needs to run once, against the FINAL
+    aggregated bentuk_reward)."""
+    template_img = _get_template_image()
+    tokens = max_new_tokens or 400
+    data, raw_text = _infer(
+        [template_img, image_bgr], DIRECT_SEMANTIC_PROMPT, tokens,
+        [MAX_SIDE_FULL, MAX_SIDE_FULL],
+    )
+    return _parse_direct_semantic_json(data), raw_text
+
+
+def _run_local_reward_detail_followup(image_bgr, clean):
+    """Fires whichever reward-detail follow-up (see section comments above
+    REWARD_DETAIL_PROMPT/REWARD_TUNAI_DETAIL_PROMPT) matches `clean`'s
+    already-resolved bentuk_reward, and attaches both result keys to
+    `clean` in place (returns it too, for convenience). Shared by
+    extract_direct_semantic_local and extract_direct_semantic_local_majority
+    so this runs exactly ONCE regardless of how many votes were taken for
+    the main call."""
+    reward_choice = clean.get("bentuk_reward", {}).get("value")
+    non_tunai_detail, tunai_detail = None, None
+    if reward_choice == "non_tunai":
+        non_tunai_detail = _extract_reward_detail_local(image_bgr)
+    elif reward_choice == "tunai":
+        tunai_detail = _extract_reward_tunai_detail_local(image_bgr)
+    clean["reward_non_tunai_detail"] = {"value": non_tunai_detail, "confidence": 0.0}
+    clean["reward_tunai_detail"] = {"value": tunai_detail, "confidence": 0.0}
+    return clean
+
+
 def extract_direct_semantic_local(image_bgr, max_new_tokens=None):
     """Local counterpart of extract_direct_semantic_hosted() -- same two
     images (template + document, SAME resolution -- see comment above for
@@ -640,36 +794,70 @@ def extract_direct_semantic_local(image_bgr, max_new_tokens=None):
     MAX_SIDE_FULL (VLM_MAX_SIDE_FULL env var) and 4-bit quantized loading in
     _load(). Returns (clean_dict, raw_text), same shape as the hosted
     function minus the meta_dict (no model/provider/elapsed_s to report --
-    the caller already knows which local model is configured)."""
-    template_img = _get_template_image()
-    tokens = max_new_tokens or 400
-    data, raw_text = _infer(
-        [template_img, image_bgr], DIRECT_SEMANTIC_PROMPT, tokens,
-        [MAX_SIDE_FULL, MAX_SIDE_FULL],
-    )
-    clean = _parse_direct_semantic_json(data)
+    the caller already knows which local model is configured).
 
-    # V19f: conditional reward-detail follow-up (see section comments above
-    # REWARD_DETAIL_PROMPT/REWARD_TUNAI_DETAIL_PROMPT) -- previously ONLY
-    # wired into extract_direct_semantic_hosted_majority, so local Qwen's
-    # reward_tunai/reward_non_tunai were always the mirrored choice-word
-    # placeholder, never a real amount/description. One extra local-model
-    # call, fired only when the main call already resolved a reward choice.
-    reward_choice = clean.get("bentuk_reward", {}).get("value")
-    non_tunai_detail, tunai_detail = None, None
-    if reward_choice == "non_tunai":
-        non_tunai_detail = _extract_reward_detail_local(image_bgr)
-    elif reward_choice == "tunai":
-        tunai_detail = _extract_reward_tunai_detail_local(image_bgr)
-    clean["reward_non_tunai_detail"] = {"value": non_tunai_detail, "confidence": 0.0}
-    clean["reward_tunai_detail"] = {"value": tunai_detail, "confidence": 0.0}
-
+    Single-call variant, no signature voting -- see
+    extract_direct_semantic_local_majority below for the voted variant,
+    which is what extractors.run_qwen3_vl_local actually calls by default
+    (LOCAL_SIGNATURE_VOTE_COUNT). This function is kept as a plain
+    single-call building block (also used internally as `votes=1`)."""
+    clean, raw_text = _extract_direct_semantic_local_core(image_bgr, max_new_tokens)
+    clean = _run_local_reward_detail_followup(image_bgr, clean)
     return clean, raw_text
 
 
+def extract_direct_semantic_local_majority(image_bgr, votes=None, max_new_tokens=None):
+    """Local counterpart of extract_direct_semantic_hosted_majority() --
+    V19f, added once local inference became fast enough (~22-26s/doc on the
+    validated hardware, see the comment above this section) for
+    LOCAL_SIGNATURE_VOTE_COUNT's default of 3 votes to be worthwhile (local
+    previously ran a single deterministic call only, per handover.md SS9e's
+    now-stale ">5 minutes/call" timing on much more constrained hardware).
+
+    Calls _extract_direct_semantic_local_core() `votes` times and aggregates
+    ONLY the two signature fields via _aggregate_signature_votes -- the SAME
+    shared, lenient any-present-wins policy the hosted engine uses, so the
+    two engines' voting behavior can't drift apart. Text/number fields are
+    taken as-is from the first run (same reasoning as the hosted function:
+    already reliably consistent from a single call; a naive exact-match vote
+    would break on harmless formatting differences). The reward-detail
+    follow-up fires exactly once, against the FINAL aggregated bentuk_reward,
+    after voting completes -- not once per vote.
+
+    Returns (clean_dict, first_run_raw_text, meta_dict) -- meta_dict is
+    {"votes": int, "signature_votes": {field: [bool, ...]}}, matching the
+    shape of the hosted function's meta_dict (minus model/provider/
+    elapsed_s, which don't apply to a local, non-network call)."""
+    votes = votes or LOCAL_SIGNATURE_VOTE_COUNT
+    runs = []
+    for i in range(votes):
+        clean, raw_text = _extract_direct_semantic_local_core(image_bgr, max_new_tokens)
+        runs.append((clean, raw_text))
+        print(f"[qwen3_vl_local] vote {i + 1}/{votes}: "
+              f"signature_nasabah={clean['signature_nasabah']['value']} "
+              f"signature_bri={clean['signature_bri']['value']}")
+
+    final_clean, first_raw_text = runs[0]
+    aggregated, signature_votes = _aggregate_signature_votes([r[0] for r in runs])
+    final_clean.update(aggregated)
+    print(f"[qwen3_vl_local] lenient vote result: "
+          f"signature_nasabah={final_clean['signature_nasabah']['value']} "
+          f"signature_bri={final_clean['signature_bri']['value']} "
+          f"(raw votes={signature_votes})")
+
+    final_clean = _run_local_reward_detail_followup(image_bgr, final_clean)
+
+    meta = {"votes": votes, "signature_votes": signature_votes}
+    return final_clean, first_raw_text, meta
+
+
 # ============================================================================
-# HOSTED -- Hugging Face Inference API test for Qwen3-VL-2B-Instruct
-# (extractors.run_qwen3_vl_hosted, engine id "qwen3_vl"). NO local weights,
+# HOSTED -- Hugging Face Inference API test for Qwen3-VL (default model id
+# in config.QWEN_MODEL_DEFAULT, overridable via the QWEN_MODEL env var --
+# V19f: aligned to Qwen/Qwen3-VL-4B-Instruct, matching the local engine's
+# validated default below, instead of the smaller 2B model both used to
+# default to; see extractors.run_qwen3_vl_hosted, engine id "qwen3_vl").
+# NO local weights,
 # NO torch/transformers -- one chat-completion call to HF's hosted
 # infrastructure via huggingface_hub.InferenceClient. Reuses the SAME
 # DIRECT_SEMANTIC_PROMPT/DIRECT_SEMANTIC_FIELDS contract + _extract_json/
@@ -766,7 +954,7 @@ def extract_direct_semantic_hosted(image_bgr, model=None, hf_token=None, timeout
     token = (hf_token or os.environ.get("HF_TOKEN", "")).strip()
     if not token:
         raise HostedInferenceError("HF_TOKEN environment variable is not set")
-    model = (model or os.environ.get("QWEN_MODEL", "Qwen/Qwen3-VL-2B-Instruct")).strip()
+    model = (model or os.environ.get("QWEN_MODEL", "Qwen/Qwen3-VL-4B-Instruct")).strip()
     timeout = timeout if timeout is not None else int(os.environ.get("HF_REQUEST_TIMEOUT_S", "60"))
     provider = provider or os.environ.get("HF_PROVIDER", "").strip() or None
 
@@ -1021,9 +1209,6 @@ def _extract_reward_tunai_detail_local(image_bgr):
     return value
 
 
-_VOTED_SIGNATURE_FIELDS = ("signature_nasabah", "signature_bri")
-
-
 def extract_direct_semantic_hosted_majority(image_bgr, model=None, hf_token=None, timeout=None,
                                              max_new_tokens=None, provider=None, votes=None):
     """Calls extract_direct_semantic_hosted() `votes` times (default
@@ -1031,15 +1216,17 @@ def extract_direct_semantic_hosted_majority(image_bgr, model=None, hf_token=None
     signature fields -- added specifically because those two fields (and
     only those two) gave a DIFFERENT true/false verdict on the IDENTICAL
     document across repeated single-call tests at temperature=0 (documented
-    in handover.md). Aggregation is LENIENT, not a strict majority (explicit
-    user policy): ANY run saying "present" makes the final answer present;
-    "absent" only survives if EVERY run agrees nothing is there -- false
-    negatives (rejecting a real signature) are treated as worse than false
-    positives here. Text/number fields are deliberately NOT re-voted: their
-    formatting varies harmlessly between runs (e.g. "5000000" vs "Rp
-    5.000.000" for the same correct amount), which would break a naive
-    exact-match vote, and they were already reliably correct from a single
-    call -- so they're taken as-is from the FIRST run.
+    in handover.md). Aggregation (see _aggregate_signature_votes, shared
+    with extract_direct_semantic_local_majority) is LENIENT, not a strict
+    majority (explicit user policy): ANY run saying "present" makes the
+    final answer present; "absent" only survives if EVERY run agrees
+    nothing is there -- false negatives (rejecting a real signature) are
+    treated as worse than false positives here. Text/number fields are
+    deliberately NOT re-voted: their formatting varies harmlessly between
+    runs (e.g. "5000000" vs "Rp 5.000.000" for the same correct amount),
+    which would break a naive exact-match vote, and they were already
+    reliably correct from a single call -- so they're taken as-is from the
+    FIRST run.
 
     Costs `votes`x the API calls/latency/token spend of a single call (each
     full run still re-extracts every field, simplest correct
@@ -1061,20 +1248,8 @@ def extract_direct_semantic_hosted_majority(image_bgr, model=None, hf_token=None
               f"signature_bri={clean['signature_bri']['value']}")
 
     final_clean, first_raw_text, first_meta = runs[0]
-    signature_votes = {}
-    for field in _VOTED_SIGNATURE_FIELDS:
-        values = [r[0][field]["value"] for r in runs]
-        confidences = [r[0][field]["confidence"] for r in runs]
-        signature_votes[field] = values
-        # LENIENT aggregation (explicit user policy): absence should be the
-        # harder conclusion to reach -- ANY vote saying "present" is enough
-        # to call it present; "absent" requires EVERY vote to agree nothing
-        # is there. Deliberately NOT a strict majority (that would still let
-        # 2-out-of-3 "absent" votes override a single correct "present").
-        final_clean[field] = {
-            "value": any(values),
-            "confidence": sum(confidences) / len(confidences),
-        }
+    aggregated, signature_votes = _aggregate_signature_votes([r[0] for r in runs])
+    final_clean.update(aggregated)
 
     meta = dict(first_meta)
     meta["votes"] = votes

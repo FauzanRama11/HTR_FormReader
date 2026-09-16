@@ -302,6 +302,15 @@
     color: #475569;
   }
 
+  /* V20: distinct from note-tenor/note-reward (data mismatch) on purpose --
+     this flags a MODEL/PIPELINE failure (every core field collapsed to
+     not_detected at once), not a data-quality issue with the document. */
+  .note-collapse {
+    background: #fff1f2;
+    border: 1px solid #fda4af;
+    color: #9f1239;
+  }
+
   /* V19f: satu badge per RECORD (bukan per field) yang menampilkan extractor
      yang benar-benar dipakai (lihat app.py's "Extractor: {engine_label}"
      note, notesCellHtml/noteBadgeClass di bawah). */
@@ -349,6 +358,12 @@
     color: #a21caf;
   }
 
+  button.note-badge.note-collapse:disabled {
+    background: #fff1f2;
+    border-color: #fda4af;
+    color: #9f1239;
+  }
+
   button.note-badge.note-default:disabled {
     background: #f8fafc;
     border-color: #dbe4ee;
@@ -359,6 +374,52 @@
   details { margin-top: 8px; }
   summary { cursor: pointer; font-weight: bold; margin-bottom: 8px; }
   pre { background: #111827; color: #d1fae5; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; max-height: 500px; }
+
+  /* V20 -- Live Evaluation modal. First overlay/dialog in this codebase --
+     reuses existing tokens only (font, blue accent, card radius/shadow,
+     badge status colors) rather than introducing a new visual language. */
+  .eval-modal-backdrop {
+    position: fixed; inset: 0; background: rgba(15,23,42,.45);
+    display: flex; align-items: center; justify-content: center; z-index: 1000;
+  }
+  .eval-modal-card {
+    background: #fff; border-radius: 14px; box-shadow: 0 8px 24px rgba(15,23,42,.06);
+    border: 1px solid #e2e8f0; width: min(960px, 94vw); max-height: 88vh;
+    overflow-y: auto; padding: 20px 24px; font-family: 'Segoe UI', Arial, sans-serif;
+  }
+  .eval-modal-header {
+    display: flex; align-items: flex-start; gap: 12px; border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 12px; margin-bottom: 16px;
+  }
+  .eval-modal-header h3 { margin: 0; }
+  .eval-modal-subtitle { color: #4b5563; font-size: 13px; margin: 2px 0 0; }
+  .eval-engine-badge {
+    margin-left: auto; background: #eff6ff; color: #2563eb; border-radius: 999px;
+    padding: 4px 12px; font-size: 12px; font-weight: 600; white-space: nowrap;
+  }
+  .eval-modal-close {
+    border: none; background: transparent; font-size: 22px; line-height: 1;
+    cursor: pointer; color: #4b5563; padding: 0 2px;
+  }
+  .eval-summary-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+  .eval-summary-tile {
+    flex: 1 1 140px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.07); font-size: 13px;
+  }
+  .eval-summary-tile b { font-size: 18px; display: block; margin-bottom: 2px; }
+  .eval-section-title { font-size: 14px; font-weight: 600; margin: 18px 0 8px; color: #1f2937; }
+  .eval-caption { font-size: 12px; color: #6b7280; margin: 4px 0 0; }
+  .eval-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 4px; }
+  .eval-table th, .eval-table td { border: 1px solid #e2e8f0; padding: 6px 10px; text-align: left; }
+  .eval-table th { background: #f8fafc; font-weight: 600; }
+  .eval-cm-cell-0 { background: #f3f4f6; color: #6b7280; }
+  .eval-cm-cell-diag { background: #dcfce7; color: #15803d; font-weight: 600; }
+  .eval-cm-cell-off { background: #fee2e2; color: #b91c1c; }
+  .eval-empty-note { color: #6b7280; font-size: 13px; }
+  .eval-error-box {
+    background: #fee2e2; border: 1px solid #fca5a5; color: #991b1b; border-radius: 8px;
+    padding: 10px 14px; font-size: 13px;
+  }
 </style>
 </head>
 <body>
@@ -382,6 +443,7 @@
       <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
       <option value="qwen3_vl">Qwen3-VL-2B (HF Hosted)</option>
       <option value="qwen3_vl_local">Qwen3-VL-2B (Local GPU, EXPERIMENTAL)</option>
+      <option value="qwen3_vl_local_yolos">Qwen3-VL Local + YOLOS Signature</option>
     </select>
     <br><br>
     <button id="processBtn" disabled>Proses Dokumen</button>
@@ -503,6 +565,7 @@
                 <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
                 <option value="qwen3_vl">Qwen3-VL-2B (HF Hosted)</option>
                 <option value="qwen3_vl_local">Qwen3-VL-2B (Local GPU, EXPERIMENTAL)</option>
+                <option value="qwen3_vl_local_yolos">Qwen3-VL Local + YOLOS Signature</option>
               </select>
             </div>
             <div class="toolbar-group">
@@ -518,6 +581,9 @@
             </div>
             <div class="toolbar-group">
               <button id="sheetExportBtn" class="btn-sm">Export Excel</button>
+            </div>
+            <div class="toolbar-group">
+              <button id="sheetEvalBtn" class="btn-sm" disabled title="Evaluasi agregat dari hasil yang SUDAH diproses -- tidak menjalankan OCR ulang">Evaluasi</button>
             </div>
             <div class="toolbar-group">
               <label for="pageSizeSelect" style="font-size:12px;color:#4b5563;">Baris/halaman:</label>
@@ -604,6 +670,20 @@
       <summary>Raw Structured JSON (untuk debugging)</summary>
       <pre id="sheetJsonOutput"></pre>
     </details>
+  </div>
+</div>
+
+<div id="evalModalBackdrop" class="eval-modal-backdrop" style="display:none;">
+  <div class="eval-modal-card" role="dialog" aria-modal="true" aria-labelledby="evalModalTitle">
+    <div class="eval-modal-header">
+      <div>
+        <h3 id="evalModalTitle">Evaluation Results</h3>
+        <p class="eval-modal-subtitle">Performance evaluation based on processed documents</p>
+      </div>
+      <span id="evalEngineBadge" class="eval-engine-badge"></span>
+      <button id="evalModalCloseBtn" class="eval-modal-close" aria-label="Tutup" title="Tutup">&times;</button>
+    </div>
+    <div id="evalModalBody" class="eval-modal-body"></div>
   </div>
 </div>
 
@@ -926,6 +1006,11 @@ const sheetSubmitBtn = document.getElementById("sheetSubmitBtn");
 const sheetBulkRunBtn = document.getElementById("sheetBulkRunBtn");
 const sheetStopBtn = document.getElementById("sheetStopBtn");
 const sheetExportBtn = document.getElementById("sheetExportBtn");
+const sheetEvalBtn = document.getElementById("sheetEvalBtn");
+const evalModalBackdrop = document.getElementById("evalModalBackdrop");
+const evalModalBody = document.getElementById("evalModalBody");
+const evalEngineBadge = document.getElementById("evalEngineBadge");
+const evalModalCloseBtn = document.getElementById("evalModalCloseBtn");
 const sheetSearchInput = document.getElementById("sheetSearchInput");
 const pageSizeSelect = document.getElementById("pageSizeSelect");
 const checkedCountEl = document.getElementById("checkedCount");
@@ -1245,6 +1330,7 @@ function escapeHtml(value) {
 const EXACT_NOTE_LABELS = new Set([
   "Name Mismatch", "Name Uncertain", "Invalid/Reversed Date Range",
   "Tenor Conflict", "Reward Uncertain", "Signature Absent",
+  "Extraction Collapsed",
 ]);
 
 function normalizeNoteLabel(note) {
@@ -1278,6 +1364,7 @@ function noteBadgeClass(label) {
   if (low.startsWith("extractor:")) return "note-extractor";
   if (label === "Tenor Tidak Sesuai" || label === "Tenor Conflict" || label === "Invalid/Reversed Date Range") return "note-tenor";
   if (label === "Reward Tidak Sesuai" || label === "Reward Uncertain") return "note-reward";
+  if (label === "Extraction Collapsed") return "note-collapse";
   return "note-default";
 }
 
@@ -1543,6 +1630,7 @@ pageSizeSelect.addEventListener("change", () => {
 });
 
 function renderSheetTable() {
+  updateEvalButtonState();
   if (currentRecords.length === 0) {
     sheetTableSection.style.display = "none";
     return;
@@ -1836,7 +1924,152 @@ function updateStatusCells() {
     if (notesCell) notesCell.innerHTML = notesCellHtml(batchDecision[no]);
   });
   setProcessingState(isRunLocked());
+  updateEvalButtonState();
 }
+
+// ============================================================================
+// V20 -- LIVE EVALUATION MODAL. Aggregates ONLY already-stored results (GET
+// /api/sheet/evaluation/{session}, live_evaluation.py) -- never triggers OCR.
+// Enabled state is recomputed from the SAME batchStatus map every other UI
+// piece already uses, from the two existing choke points above
+// (updateStatusCells/renderSheetTable) -- covers single/bulk/index-range
+// run, rerun, and a restored session with no extra per-action wiring.
+// ============================================================================
+function updateEvalButtonState() {
+  if (!sheetEvalBtn) return;
+  sheetEvalBtn.disabled = !Object.values(batchStatus).some((s) => s === "done");
+}
+
+const EVAL_FIELD_LABEL = Object.fromEntries(SUMMARY_FIELDS.map((f) => [f.key, f.label]));
+
+function evalFmtPct(v) { return typeof v === "number" ? `${(v * 100).toFixed(1)}%` : "N/A"; }
+function evalFmtSec(v) { return typeof v === "number" ? `${v.toFixed(2)}s` : "N/A"; }
+
+async function openEvaluationModal() {
+  if (!currentSessionId) return;
+  evalEngineBadge.textContent = "";
+  evalModalBody.innerHTML = `<p class="eval-empty-note">Memuat evaluasi...</p>`;
+  evalModalBackdrop.style.display = "flex";
+  try {
+    // cache:"no-store" -- ALWAYS fresh on open, never a stale/previous fetch's data.
+    const res = await fetch(`/api/sheet/evaluation/${currentSessionId}`, { cache: "no-store" });
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* non-JSON error body -- handled below */ }
+    if (!res.ok) {
+      const msg = (data && data.error) || `Gagal memuat evaluasi (HTTP ${res.status}).`;
+      evalModalBody.innerHTML = `<div class="eval-error-box">${escapeHtml(msg)}${res.status === 404 ? " Muat ulang Excel/Google Spreadsheet untuk memulai sesi baru." : ""}</div>`;
+      return;
+    }
+    renderEvaluationModal(data);
+  } catch (err) {
+    evalModalBody.innerHTML = `<div class="eval-error-box">Gagal menghubungi server: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function closeEvaluationModal() {
+  evalModalBackdrop.style.display = "none";
+}
+
+function renderEvalConfusionMatrix(fieldKey, cm) {
+  const label = EVAL_FIELD_LABEL[fieldKey] || fieldKey;
+  const title = `<div class="eval-section-title">Confusion Matrix &mdash; ${escapeHtml(label)}</div>`;
+  if (!cm || cm.available === false || !cm.classes || !cm.classes.length) {
+    return title + `<p class="eval-empty-note">N/A -- tidak ada ground truth yang bisa dipakai untuk field ini.</p>`;
+  }
+  const cols = cm.predicted_classes && cm.predicted_classes.length ? cm.predicted_classes : cm.classes;
+  const rows = cm.classes.map((actual) => {
+    const cells = cols.map((pred) => {
+      const val = (cm.matrix[actual] && cm.matrix[actual][pred]) || 0;
+      const cls = val === 0 ? "eval-cm-cell-0" : (actual === pred ? "eval-cm-cell-diag" : "eval-cm-cell-off");
+      return `<td class="${cls}">${val}</td>`;
+    }).join("");
+    return `<tr><td><b>${escapeHtml(actual)}</b></td>${cells}</tr>`;
+  }).join("");
+  const caption = cm.gt_source === "verification_status_heuristic"
+    ? `<p class="eval-caption">Ground truth pendekatan sementara dari kolom Status Verifikasi (belum dataset TTD khusus) -- ${cm.excluded_count || 0} record dikecualikan (tidak disebut eksplisit di catatan verifikasi).</p>`
+    : `<p class="eval-caption">Macro P/R/F1: ${evalFmtPct(cm.macro_precision)} / ${evalFmtPct(cm.macro_recall)} / ${evalFmtPct(cm.macro_f1)} &middot; ${cm.excluded_count || 0} record dikecualikan (data tidak terbaca/kosong).</p>`;
+  return `${title}
+    <table class="eval-table">
+      <thead><tr><th>Actual \\ Predicted</th>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${caption}`;
+}
+
+function renderEvaluationModal(data) {
+  evalEngineBadge.textContent = data.engine_label || "N/A";
+  if (!data.documents_evaluated) {
+    evalModalBody.innerHTML = `<p class="eval-empty-note">Belum ada record yang selesai diproses pada sesi ini.</p>`;
+    return;
+  }
+  const o = data.overall || {};
+  const summaryHtml = `
+    <div class="eval-summary-row">
+      <div class="eval-summary-tile"><b>${data.documents_evaluated}</b>Documents Evaluated</div>
+      <div class="eval-summary-tile"><b>${evalFmtPct(o.accuracy)}</b>Overall Accuracy</div>
+      <div class="eval-summary-tile"><b>${evalFmtPct(o.precision_macro)}</b>Precision Macro</div>
+      <div class="eval-summary-tile"><b>${evalFmtPct(o.recall_macro)}</b>Recall Macro</div>
+      <div class="eval-summary-tile"><b>${evalFmtPct(o.f1_macro)}</b>F1 Macro</div>
+      <div class="eval-summary-tile"><b>${evalFmtSec(data.runtime && data.runtime.average_seconds)}</b>Avg Runtime / Doc</div>
+    </div>`;
+
+  const fieldRows = Object.entries(data.field_accuracy || {}).map(([field, s]) => `
+    <tr>
+      <td>${escapeHtml(EVAL_FIELD_LABEL[field] || field)}</td>
+      <td>${evalFmtPct(s.accuracy)}</td>
+      <td>${typeof s.precision === "number" ? evalFmtPct(s.precision) : "N/A"}</td>
+      <td>${typeof s.recall === "number" ? evalFmtPct(s.recall) : "N/A"}</td>
+      <td>${typeof s.f1 === "number" ? evalFmtPct(s.f1) : "N/A"}</td>
+    </tr>`).join("");
+  const fieldTableHtml = `
+    <div class="eval-section-title">Akurasi per Field</div>
+    <table class="eval-table">
+      <thead><tr><th>Field</th><th>Accuracy</th><th>Precision</th><th>Recall</th><th>F1-Score</th></tr></thead>
+      <tbody>${fieldRows}</tbody>
+    </table>`;
+
+  const cmOrder = ["tenor_penempatan", "bentuk_reward", "signature_nasabah", "signature_atasan"];
+  const cmHtml = cmOrder
+    .filter((f) => data.confusion_matrices && data.confusion_matrices[f])
+    .map((f) => renderEvalConfusionMatrix(f, data.confusion_matrices[f]))
+    .join("");
+
+  const r = data.runtime || {};
+  const runtimeHtml = `
+    <div class="eval-section-title">Runtime Performance</div>
+    <table class="eval-table"><tbody>
+      <tr><td>Average</td><td>${evalFmtSec(r.average_seconds)}</td></tr>
+      <tr><td>Fastest</td><td>${evalFmtSec(r.fastest_seconds)}</td></tr>
+      <tr><td>Slowest</td><td>${evalFmtSec(r.slowest_seconds)}</td></tr>
+      <tr><td>Total</td><td>${evalFmtSec(r.total_seconds)}</td></tr>
+      <tr><td>Documents Measured</td><td>${r.documents_measured ?? 0}</td></tr>
+    </tbody></table>`;
+
+  const ec = data.extraction_collapsed || {};
+  const extractionStatusHtml = `
+    <div class="eval-section-title">Extraction Status</div>
+    <table class="eval-table"><tbody>
+      <tr><td>Processed</td><td>${ec.total ?? 0}</td></tr>
+      <tr><td>Extraction Collapsed</td><td>${ec.count ?? 0} (${evalFmtPct(ec.rate)})</td></tr>
+    </tbody></table>
+    <p class="eval-caption">Extraction Collapsed = model mengembalikan JSON valid tapi SEMUA field inti (nama/rekening/nominal/tenor/reward) tidak terbaca sekaligus -- kegagalan model/pipeline, bukan ketidakcocokan data.</p>`;
+
+  const noteHtml = `<div class="eval-section-title">Catatan Evaluasi</div>
+    <p class="eval-caption">Documents Total pada sesi ini: ${data.documents_total ?? "N/A"}. Precision/Recall/F1 hanya valid untuk field kategorikal dengan kelas tetap (Tenor, Bentuk Reward) -- field teks/angka lain (Nama, Nomor Rekening, Nominal) hanya diukur dari Accuracy.</p>`;
+
+  evalModalBody.innerHTML = summaryHtml + fieldTableHtml + cmHtml + runtimeHtml + extractionStatusHtml + noteHtml;
+}
+
+if (sheetEvalBtn) sheetEvalBtn.addEventListener("click", openEvaluationModal);
+if (evalModalCloseBtn) evalModalCloseBtn.addEventListener("click", closeEvaluationModal);
+if (evalModalBackdrop) {
+  evalModalBackdrop.addEventListener("click", (e) => {
+    if (e.target === evalModalBackdrop) closeEvaluationModal();
+  });
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && evalModalBackdrop && evalModalBackdrop.style.display !== "none") closeEvaluationModal();
+});
 
 function startBatchPolling() {
   stopBatchPolling();

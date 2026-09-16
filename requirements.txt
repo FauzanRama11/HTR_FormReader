@@ -89,3 +89,18 @@ python-dotenv>=1.2.3  # optional convenience: auto-loads .env in app.py/evaluati
 # transformers (those stay above, still required for the separate local V10/
 # V12 VLM fallback used inside pipeline.py, unrelated to this engine).
 huggingface_hub>=0.26
+
+# V20 -- Local signature detector (signature_detector.py,
+# "qwen3_vl_local_yolos" HYBRID engine ONLY -- does not affect
+# qwen3_vl_local/any other engine). Loads mdefrance/yolos-tiny-signature-
+# detection (Hugging Face Hub, Apache-2.0, NOT gated) via the SAME
+# transformers AutoImageProcessor/AutoModelForObjectDetection APIs already
+# required above for Qwen -- NO new dependency at all. (An earlier attempt
+# targeted Tech4Humans' YOLOv8 signature detector via the `ultralytics`
+# package instead -- abandoned because that model's HF repo is GATED
+# [requires manually accepting access on the website, no scriptable path],
+# and because `ultralytics` pulls in its own "opencv-python" which
+# collides with opencv-python-headless above [both provide the `cv2`
+# import] -- confirmed this collision actually broke the environment once
+# this session before being fixed. Do not reintroduce `ultralytics` without
+# re-reading handover.md's V20 section first.)
