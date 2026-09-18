@@ -87,22 +87,23 @@ import time
 import traceback
 from pathlib import Path
 
+# Dijalankan langsung (`python eval_tools/stage_evaluation.py ...`), jadi
+# sys.path[0] = folder eval_tools/ ini sendiri -- root harus ditambah manual.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import cv2
 
-import data_input
-import pipeline
-import preprocessing as prep
-import postprocessing as post
-import comparison
-import evaluation as ev9   # REUSE V9.2 field normalization/perbandingan
+from core import data_input
+import pipeline.pipeline as pipeline
+from pipeline import preprocessing as prep
+from pipeline import postprocessing as post
+from pipeline import comparison
+from eval_tools import evaluation as ev9   # REUSE V9.2 field normalization/perbandingan
                             # (compare_field, _extract_value, FIELD_GT_MAP) --
                             # TIDAK diduplikasi di sini.
+from core.paths import PROJECT_ROOT, EVAL_RUNS_DIR
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_DEBUG_DIR = BASE_DIR / "stage_evaluation_debug"
-# V18 -- kumpul di eval_runs/ bareng output evaluation.py/signature_
-# diagnostics.py, bukan root project (lihat handover.md §12).
-EVAL_RUNS_DIR = BASE_DIR / "eval_runs"
+DEFAULT_DEBUG_DIR = PROJECT_ROOT / "stage_evaluation_debug"
 
 # ============================================================================
 # CONFIG -- field groups (REUSE definisi produksi, tidak hardcode ulang)

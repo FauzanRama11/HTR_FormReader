@@ -40,10 +40,13 @@ import sys
 import time
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+# Dijalankan langsung (`python eval_tools/compare_runs.py ...`), jadi
+# sys.path[0] = folder eval_tools/ ini sendiri -- root harus ditambah manual.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # V18 -- kumpul di eval_runs/ bareng output evaluation.py/stage_evaluation.py
 # (lihat handover.md §12).
-EVAL_RUNS_DIR = BASE_DIR / "eval_runs"
+from core.paths import EVAL_RUNS_DIR
 
 # Metadata key yang TIDAK dianggap "metrik terukur" (label run itu sendiri),
 # ditampilkan sbg header, bukan baris tabel metrik.

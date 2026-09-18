@@ -15,20 +15,23 @@ Jalankan:
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 
-import data_input
-import pipeline
-import preprocessing as prep
+# Dijalankan langsung (`python eval_tools/signature_diagnostics.py ...`),
+# jadi sys.path[0] = folder eval_tools/ ini sendiri -- root harus ditambah manual.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core import data_input
+import pipeline.pipeline as pipeline
+from pipeline import preprocessing as prep
+from core.paths import EVAL_RUNS_DIR
 
 FIELDS = ("signature_nasabah", "signature_atasan")
 COLUMNS = (
     "record", "field", "status", "ink_area_ratio", "ink_spread_x", "ink_spread_y",
     "component_count", "change_ratio", "roi_source", "anchor_similarity",
 )
-# V18 -- kumpul di eval_runs/ bareng output evaluation.py, bukan root project
-# (lihat handover.md §12).
-EVAL_RUNS_DIR = Path(__file__).resolve().parent / "eval_runs"
 
 
 def main():

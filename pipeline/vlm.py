@@ -12,7 +12,7 @@ from pathlib import Path
 import cv2
 from PIL import Image
 
-BASE_DIR = Path(__file__).resolve().parent
+from core.paths import MODELS_DIR
 # V19f: "Qwen3-VL-2B-Instruct" never actually existed under models/ (only
 # Qwen2-VL-2B-Instruct and Qwen3-VL-4B-Instruct do) -- listing it first meant
 # _resolve_model_path() always fell through to the old Qwen2-VL-2B-Instruct,
@@ -22,8 +22,8 @@ BASE_DIR = Path(__file__).resolve().parent
 # 4B model first, falling back to Qwen2-VL-2B-Instruct on machines that don't
 # have the 4B weights downloaded.
 DEFAULT_LOCAL_CANDIDATES = [
-    BASE_DIR / "models" / "Qwen3-VL-4B-Instruct",
-    BASE_DIR / "models" / "Qwen2-VL-2B-Instruct",
+    MODELS_DIR / "Qwen3-VL-4B-Instruct",
+    MODELS_DIR / "Qwen2-VL-2B-Instruct",
     Path("C:/models/Qwen3-VL-4B-Instruct"),
     Path("C:/models/Qwen2-VL-2B-Instruct"),
     Path("/models/Qwen2-VL-2B-Instruct"),
@@ -185,15 +185,34 @@ def _load():
         except ImportError:
             use_4bit = False  # bitsandbytes not installed -- fall back to full precision below
 
+    # Pin the attention backend explicitly instead of relying on
+    # transformers' implicit auto-selection (currently resolves to "sdpa" on
+    # this stack -- verified directly against the loaded model's config).
+    # flash_attention_2 is NOT used: it's not installed, and is notoriously
+    # fragile to build on Windows/this CUDA build -- not worth the new
+    # dependency for a batch-size-1, single-image-pair workload where sdpa
+    # is already the right tradeoff. Pinning it here just guards against a
+    # future transformers/torch upgrade silently changing the default.
     if use_4bit:
-        _model = ModelClass.from_pretrained(
-            _model_path,
-            quantization_config=quantization_config,
-            device_map={"": 0},
-            local_files_only=OFFLINE,
-            trust_remote_code=True,
-            low_cpu_mem_usage=True,
-        )
+        try:
+            _model = ModelClass.from_pretrained(
+                _model_path,
+                quantization_config=quantization_config,
+                device_map={"": 0},
+                local_files_only=OFFLINE,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                attn_implementation="sdpa",
+            )
+        except TypeError:
+            _model = ModelClass.from_pretrained(
+                _model_path,
+                quantization_config=quantization_config,
+                device_map={"": 0},
+                local_files_only=OFFLINE,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+            )
         _model = _model.eval()
         return _model, _processor, _device
 
@@ -207,13 +226,23 @@ def _load():
             local_files_only=OFFLINE,
             trust_remote_code=True,
             low_cpu_mem_usage=True,
+            attn_implementation="sdpa",
         )
     except TypeError:
-        _model = ModelClass.from_pretrained(
-            _model_path,
-            local_files_only=OFFLINE,
-            trust_remote_code=True,
-        )
+        try:
+            _model = ModelClass.from_pretrained(
+                _model_path,
+                torch_dtype=dtype,
+                local_files_only=OFFLINE,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+            )
+        except TypeError:
+            _model = ModelClass.from_pretrained(
+                _model_path,
+                local_files_only=OFFLINE,
+                trust_remote_code=True,
+            )
 
     _model = _model.to(_device).eval()
     return _model, _processor, _device
@@ -471,7 +500,8 @@ def extract_fields_fullpage(aligned_img_bgr, spec_fields, max_new_tokens=None):
 # ============================================================================
 
 DIRECT_SEMANTIC_FIELDS = (
-    "nama", "nomor_rekening", "unit_kerja", "nominal_penempatan", "tenor_penempatan",
+    "nama", "nomor_rekening", "unit_kerja", "nominal_penempatan",
+    "nominal_penempatan_terbilang", "tenor_penempatan",
     "tanggal_mulai", "tanggal_selesai", "bentuk_reward",
     "signature_nasabah", "signature_bri",
 )
@@ -501,6 +531,7 @@ nama - the customer's own handwritten name
 nomor_rekening - account number
 unit_kerja - the BRI unit/branch office that manages the account, on the line printed "Unit Kerja Pengelola Rekening" (the third of three stacked identity lines: Nama Nasabah, then Nomor Rekening directly above this one, then this one, then Nominal Penempatan below)
 nominal_penempatan - placement amount
+nominal_penempatan_terbilang - the SAME placement amount, but spelled out in words, exactly as handwritten inside the parentheses right after the digit amount (the template line is "Rp………… (…………)" -- digits, then the same amount spelled out in words)
 tenor_penempatan - placement tenor
 tanggal_mulai - start date of the placement period (ISO format)
 tanggal_selesai - end date of the placement period (ISO format)
@@ -509,12 +540,14 @@ signature_nasabah - customer's signature, in the LEFT signature box near the bot
 signature_bri - bank/branch representative's signature, in the RIGHT signature box at the same height
 
 Rules:
-- nama / nomor_rekening / nominal_penempatan: read the customer's own handwriting only. Ignore printed labels, headers, and instructions.
+- nama / nomor_rekening / nominal_penempatan / nominal_penempatan_terbilang: read the customer's own handwriting only. Ignore printed labels, headers, and instructions.
+- nominal_penempatan_terbilang: read the handwritten words inside the parentheses right after the digit amount, exactly as written (do not translate/convert -- just transcribe the words). This is a SEPARATE transcription task from nominal_penempatan, used only to cross-check the two match -- report null if the parentheses are empty/blank/illegible, independently of whether nominal_penempatan itself was readable.
 - nama: some customers are businesses, not individuals. Common Indonesian legal-entity prefixes like "CV", "PT", "UD", or "Koperasi" are FIXED, well-known abbreviations -- read them as those exact known abbreviations rather than sounding out unfamiliar letters, then read the rest of the business name normally.
+- nomor_rekening: this line sits directly BELOW the customer's name line and directly ABOVE the "Unit Kerja Pengelola Rekening" line -- read ONLY the digits written on this specific middle line. A real BRI account number is typically 15-16 digits long (sometimes written with dots as visual grouping, e.g. "0219.01.030531.53.9" -- if you see dots, still report all the digits together with no separators). Never include any letters, and never include any handwriting that actually belongs to the name line above or the unit-kerja line below -- if this line's own digits are unclear or you find yourself reading into a neighboring line, prefer null over guessing a merged or partial value.
 - unit_kerja: this line sits directly below nomor_rekening, and the two are easy to visually merge (e.g. trailing digits of the account number bleeding into this line, or vice versa) -- read ONLY the handwritten unit/branch name written on the "Unit Kerja Pengelola Rekening" line itself, never any digits, and never the printed label text as if it were the value. If you cannot cleanly separate this line's handwriting from the account number above it, prefer null over guessing a merged value.
-- tenor_penempatan: the template prints the literal text "1 / 3 / 6 Bulan (*coret salah satu)" -- three digits separated by slashes. Customers mark their chosen digit in any of three ways, sometimes combined: (a) a strike-through/cross-out pen line drawn over the digit(s) NOT chosen, leaving the chosen one as the only one with no line through it; (b) a circle/oval drawn around the chosen digit; (c) the chosen digit re-traced/written over in bold, visibly thicker/darker ink than the printed digit and the other two options (not circled, not involving a strike on the others -- just heavier ink on the one digit). Check for all three. Report the ONE digit indicated by whichever of these signals is present (if more than one signal appears, they will agree on the same digit -- use that). Never report more than one digit, and never report the raw printed text like "1/3/6" or "3/6 Bulan". If you cannot clearly identify a single chosen digit this way, answer null.
+- tenor_penempatan: the template prints the literal text "1 / 3 / 6 Bulan (*coret salah satu)" -- three digits separated by slashes. Customers mark their chosen digit in any of three ways, sometimes combined: (a) a strike-through/cross-out pen line drawn over the digit(s) NOT chosen, leaving the chosen one as the only one with no line through it; (b) a circle/oval drawn around the chosen digit; (c) the chosen digit re-traced/written over in bold, visibly thicker/darker ink than the printed digit and the other two options (not circled, not involving a strike on the others -- just heavier ink on the one digit). Check for all three. Report the ONE digit indicated by whichever of these signals is present (if more than one signal appears, they will agree on the same digit -- use that). Never report more than one digit, and never report the raw printed text like "1/3/6" or "3/6 Bulan". This is a CHOICE field: if the three printed digits show NONE of these three marks at all -- no strike-through, no circle, no bold re-tracing, nothing distinguishing any one digit from the others -- that means the customer did not mark a choice, so answer null. Do not default to any particular digit (e.g. "1") just because it's printed first, and do not guess based on which choice seems statistically more common -- null is the correct, honest answer when no mark exists, not a fallback of last resort.
 - tanggal_mulai / tanggal_selesai: the line directly BELOW the tenor choice line prints "(tanggal........... s/d. tanggal...........)" -- a start date and an end date the customer may write by hand in the two blanks. Read them and convert each to ISO format YYYY-MM-DD. If this line is blank/not filled in (very common -- the customer already indicated tenor via the mark above), answer null for both. Never guess a date from the tenor_penempatan digit.
-- bentuk_reward: same marking convention as tenor_penempatan (strike-through the word NOT chosen, OR circle the chosen word, OR the chosen word re-traced in bold/darker ink -- check all three, they will agree if more than one appears), printed as "tunai / non tunai (*coret salah satu)". Report ONLY "tunai" or "non_tunai" (exactly one word, underscore not space, no other text); null if unclear. Ignore anything printed or written further below this line (there is a separate instructional line about "non-tunai" details below it, printed on the form for every document regardless of choice -- it is NOT evidence of which choice was made).
+- bentuk_reward: same marking convention as tenor_penempatan (strike-through the word NOT chosen, OR circle the chosen word, OR the chosen word re-traced in bold/darker ink -- check all three, they will agree if more than one appears), printed as "tunai / non tunai (*coret salah satu)". Report ONLY "tunai" or "non_tunai" (exactly one word, underscore not space, no other text); null if unclear. This is also a CHOICE field with the SAME rule as tenor_penempatan above: if NEITHER "tunai" nor "non tunai" shows any strike-through, circle, or bold re-tracing at all, answer null -- never default to "tunai" (or either word) just because it's the more common answer in this dataset; only report a value when you can actually see a mark indicating which one was chosen. Ignore anything printed or written further below this line (there is a separate instructional line about "non-tunai" details below it, printed on the form for every document regardless of choice -- it is NOT evidence of which choice was made).
 - signature_nasabah (customer, LEFT box): this specific box ALSO contains PRINTED (not handwritten) gray text reading "Opsional (Tidak Wajib) materai Rp10.000" inside a rounded rectangle -- that printed graphic is NOT a signature, ignore it completely even if it's the only thing in the box. Also ignore table borders, underlines, stamps, and scan noise/smudges -- none of these count as a signature. Answer true only for an actual handwritten signature-like mark (pen strokes, a name written in cursive/script, an initial) clearly beyond the printed graphic. Answer false if the box is genuinely empty (nothing beyond the printed graphic).
 - signature_bri (bank representative, RIGHT box): this box is otherwise blank, with only a printed dotted line "(.......)". The printed dotted line itself, table borders, stamps, and scan noise/smudges do NOT count as a signature. Answer true only for an actual handwritten signature-like mark on or near that line. Answer false if the box is truly empty -- nothing but the printed dotted line.
 - For both signature fields, your `confidence` self-rating (see the JSON shape below) matters as much as the true/false value: give a LOW confidence (below 0.5) whenever the mark is faint, partial, ambiguous, could plausibly be a print artifact/smudge/stray pen touch rather than a deliberate signature, or you are otherwise not sure -- regardless of which way you lean on true/false. Reserve a HIGH confidence (0.8+) for a clear, unambiguous read (either a plainly visible signature, or a box that is plainly, cleanly empty). Do not force a confident true/false when you are actually unsure -- an honest low confidence is far more useful than a guessed high one.
@@ -523,7 +556,47 @@ Rules:
 - Return JSON only -- no markdown, no explanation.
 
 Reply with EXACTLY this JSON shape (status is your own detected/uncertain/not_detected judgment for that field; the two signature fields keep a separate 0.0-1.0 confidence self-rating instead):
-{"nama":{"value":null,"status":"not_detected"},"nomor_rekening":{"value":null,"status":"not_detected"},"unit_kerja":{"value":null,"status":"not_detected"},"nominal_penempatan":{"value":null,"status":"not_detected"},"tenor_penempatan":{"value":null,"status":"not_detected"},"tanggal_mulai":{"value":null,"status":"not_detected"},"tanggal_selesai":{"value":null,"status":"not_detected"},"bentuk_reward":{"value":null,"status":"not_detected"},"signature_nasabah":{"value":false,"confidence":0.0},"signature_bri":{"value":false,"confidence":0.0}}"""
+{"nama":{"value":null,"status":"not_detected"},"nomor_rekening":{"value":null,"status":"not_detected"},"unit_kerja":{"value":null,"status":"not_detected"},"nominal_penempatan":{"value":null,"status":"not_detected"},"nominal_penempatan_terbilang":{"value":null,"status":"not_detected"},"tenor_penempatan":{"value":null,"status":"not_detected"},"tanggal_mulai":{"value":null,"status":"not_detected"},"tanggal_selesai":{"value":null,"status":"not_detected"},"bentuk_reward":{"value":null,"status":"not_detected"},"signature_nasabah":{"value":false,"confidence":0.0},"signature_bri":{"value":false,"confidence":0.0}}"""
+
+
+# V21 -- optional extra close-up images for the 3 fields most often
+# misread on the full, downscaled page (see handover.md V16 per-field
+# accuracy: nama_nasabah/nomor_rekening/nominal_penempatan were the
+# weakest). Only used by extractors.run_qwen3_vl_local_yolos via
+# extract_direct_semantic_local's `extra_crops` param -- every OTHER
+# caller (hosted, plain qwen3_vl_local majority-vote) passes none, so
+# their prompt/image list is BYTE-IDENTICAL to before this was added.
+_WEAK_FIELD_CROP_LABELS = {
+    "nama_nasabah": "the customer's handwritten name (nama) field only",
+    "nomor_rekening": "the account number (nomor_rekening) field only",
+    "nominal_penempatan": "the placement amount (nominal_penempatan) field only",
+}
+
+
+def _build_direct_semantic_prompt(crop_field_names):
+    """Returns DIRECT_SEMANTIC_PROMPT verbatim when crop_field_names is
+    empty (the common case for every engine except the hybrid one). When
+    non-empty, inserts one extra section -- right before the final "Reply
+    with EXACTLY this JSON shape" instruction -- describing each close-up
+    image sent AFTER the template+document pair, in the given order. These
+    do NOT add new fields to the JSON schema; they're zoomed views of
+    fields already listed above."""
+    if not crop_field_names:
+        return DIRECT_SEMANTIC_PROMPT
+    lines = "\n".join(
+        f"{i + 3}. A zoomed-in close-up of {_WEAK_FIELD_CROP_LABELS[name]}, cropped from the SAME filled document (image 2)."
+        for i, name in enumerate(crop_field_names)
+    )
+    extra_section = (
+        f"You are ALSO given {len(crop_field_names)} additional close-up image(s) after the two images "
+        f"above, in this order:\n{lines}\n\n"
+        "These close-ups do not introduce any new field -- they are zoomed views of fields already listed "
+        "above, to help you read small handwriting more precisely. If a close-up disagrees with what you "
+        "can see in the full document image, prefer the close-up (it is the higher-resolution view).\n\n"
+    )
+    marker = "Reply with EXACTLY this JSON shape"
+    idx = DIRECT_SEMANTIC_PROMPT.index(marker)
+    return DIRECT_SEMANTIC_PROMPT[:idx] + extra_section + DIRECT_SEMANTIC_PROMPT[idx:]
 
 
 def _clean_confidence(raw):
@@ -747,7 +820,7 @@ def _aggregate_signature_votes(runs_clean, fields=None):
 # fixed, matching what the hosted path already does for the same reason.
 
 
-def _extract_direct_semantic_local_core(image_bgr, max_new_tokens=None):
+def _extract_direct_semantic_local_core(image_bgr, max_new_tokens=None, extra_crops=None):
     """Single local inference call + parse ONLY -- template+document images
     through _infer()/_parse_direct_semantic_json, with NO reward-detail
     follow-up attached (see extract_direct_semantic_local and
@@ -755,36 +828,55 @@ def _extract_direct_semantic_local_core(image_bgr, max_new_tokens=None):
     Split out in V19f so the majority-vote wrapper can call just this part
     `votes` times without also repeating the reward-detail follow-up call
     `votes` times (that follow-up only needs to run once, against the FINAL
-    aggregated bentuk_reward)."""
+    aggregated bentuk_reward).
+
+    `extra_crops` (V21, optional): a list of (field_name, image_bgr) tuples
+    -- extra close-up images appended AFTER the template+document pair, sent
+    at MAX_SIDE_DETAIL (the existing crop-resolution constant, not
+    MAX_SIDE_FULL -- these are already tightly cropped, no need for full-page
+    resolution). None/empty behaves exactly as before (byte-identical prompt
+    and image list) -- see _build_direct_semantic_prompt."""
     template_img = _get_template_image()
     tokens = max_new_tokens or 400
-    data, raw_text = _infer(
-        [template_img, image_bgr], DIRECT_SEMANTIC_PROMPT, tokens,
-        [MAX_SIDE_FULL, MAX_SIDE_FULL],
-    )
+    extra_crops = extra_crops or []
+    images = [template_img, image_bgr] + [crop for _name, crop in extra_crops]
+    max_sides = [MAX_SIDE_FULL, MAX_SIDE_FULL] + [MAX_SIDE_DETAIL] * len(extra_crops)
+    prompt = _build_direct_semantic_prompt([name for name, _crop in extra_crops])
+    data, raw_text = _infer(images, prompt, tokens, max_sides)
     return _parse_direct_semantic_json(data), raw_text
 
 
-def _run_local_reward_detail_followup(image_bgr, clean):
+def _run_local_reward_detail_followup(image_bgr, clean, reward_crops=None):
     """Fires whichever reward-detail follow-up (see section comments above
     REWARD_DETAIL_PROMPT/REWARD_TUNAI_DETAIL_PROMPT) matches `clean`'s
     already-resolved bentuk_reward, and attaches both result keys to
     `clean` in place (returns it too, for convenience). Shared by
     extract_direct_semantic_local and extract_direct_semantic_local_majority
     so this runs exactly ONCE regardless of how many votes were taken for
-    the main call."""
+    the main call.
+
+    `reward_crops` (optional): {"reward_tunai": image_bgr, "reward_non_tunai":
+    image_bgr} -- close-up crops from extractors._get_weak_field_crops,
+    forwarded to whichever follow-up actually fires. None/missing keys fall
+    back to `crop=None` in the follow-up functions, i.e. today's plain
+    2-image behavior -- only extractors.run_qwen3_vl_local_yolos currently
+    passes this."""
+    reward_crops = reward_crops or {}
     reward_choice = clean.get("bentuk_reward", {}).get("value")
-    non_tunai_detail, tunai_detail = None, None
+    non_tunai_detail, tunai_detail, tunai_terbilang = None, None, None
     if reward_choice == "non_tunai":
-        non_tunai_detail = _extract_reward_detail_local(image_bgr)
+        non_tunai_detail = _extract_reward_detail_local(image_bgr, crop=reward_crops.get("reward_non_tunai"))
     elif reward_choice == "tunai":
-        tunai_detail = _extract_reward_tunai_detail_local(image_bgr)
+        tunai_detail, tunai_terbilang = _extract_reward_tunai_detail_local(
+            image_bgr, crop=reward_crops.get("reward_tunai"),
+        )
     clean["reward_non_tunai_detail"] = {"value": non_tunai_detail, "confidence": 0.0}
     clean["reward_tunai_detail"] = {"value": tunai_detail, "confidence": 0.0}
+    clean["reward_tunai_terbilang"] = {"value": tunai_terbilang, "confidence": 0.0}
     return clean
 
 
-def extract_direct_semantic_local(image_bgr, max_new_tokens=None):
+def extract_direct_semantic_local(image_bgr, max_new_tokens=None, extra_crops=None, reward_crops=None):
     """Local counterpart of extract_direct_semantic_hosted() -- same two
     images (template + document, SAME resolution -- see comment above for
     why they must match) and same DIRECT_SEMANTIC_PROMPT, but run through
@@ -800,13 +892,22 @@ def extract_direct_semantic_local(image_bgr, max_new_tokens=None):
     extract_direct_semantic_local_majority below for the voted variant,
     which is what extractors.run_qwen3_vl_local actually calls by default
     (LOCAL_SIGNATURE_VOTE_COUNT). This function is kept as a plain
-    single-call building block (also used internally as `votes=1`)."""
-    clean, raw_text = _extract_direct_semantic_local_core(image_bgr, max_new_tokens)
-    clean = _run_local_reward_detail_followup(image_bgr, clean)
+    single-call building block (also used internally as `votes=1`).
+
+    `extra_crops` (V21, optional): forwarded to _extract_direct_semantic_
+    local_core -- see its docstring. Only extractors.run_qwen3_vl_local_yolos
+    passes this; every other caller leaves it None, so their behavior is
+    unaffected.
+
+    `reward_crops` (optional): forwarded to _run_local_reward_detail_
+    followup -- see its docstring. Only extractors.run_qwen3_vl_local_yolos
+    passes this."""
+    clean, raw_text = _extract_direct_semantic_local_core(image_bgr, max_new_tokens, extra_crops)
+    clean = _run_local_reward_detail_followup(image_bgr, clean, reward_crops)
     return clean, raw_text
 
 
-def extract_direct_semantic_local_majority(image_bgr, votes=None, max_new_tokens=None):
+def extract_direct_semantic_local_majority(image_bgr, votes=None, max_new_tokens=None, reward_crops=None):
     """Local counterpart of extract_direct_semantic_hosted_majority() --
     V19f, added once local inference became fast enough (~22-26s/doc on the
     validated hardware, see the comment above this section) for
@@ -823,6 +924,12 @@ def extract_direct_semantic_local_majority(image_bgr, votes=None, max_new_tokens
     would break on harmless formatting differences). The reward-detail
     follow-up fires exactly once, against the FINAL aggregated bentuk_reward,
     after voting completes -- not once per vote.
+
+    `reward_crops` (optional): forwarded to _run_local_reward_detail_
+    followup -- see its docstring. Currently no caller passes this
+    (extractors.run_qwen3_vl_local never computes crops, deliberately
+    keeping that engine's "minimal, no ROI" design), so it's always None in
+    practice today, unless a future caller opts in.
 
     Returns (clean_dict, first_run_raw_text, meta_dict) -- meta_dict is
     {"votes": int, "signature_votes": {field: [bool, ...]}}, matching the
@@ -845,7 +952,7 @@ def extract_direct_semantic_local_majority(image_bgr, votes=None, max_new_tokens
           f"signature_bri={final_clean['signature_bri']['value']} "
           f"(raw votes={signature_votes})")
 
-    final_clean = _run_local_reward_detail_followup(image_bgr, final_clean)
+    final_clean = _run_local_reward_detail_followup(image_bgr, final_clean, reward_crops)
 
     meta = {"votes": votes, "signature_votes": signature_votes}
     return final_clean, first_raw_text, meta
@@ -896,7 +1003,7 @@ def _get_template_image():
     path (extract_direct_semantic_local, passes this straight to _infer)."""
     global _TEMPLATE_IMAGE
     if _TEMPLATE_IMAGE is None:
-        import preprocessing as prep
+        from pipeline import preprocessing as prep
         _TEMPLATE_IMAGE = prep.load_document(prep.TEMPLATE_PATH)
     return _TEMPLATE_IMAGE
 
@@ -1045,6 +1152,29 @@ Reply with EXACTLY this JSON shape, no markdown, no explanation:
 
 _REWARD_DETAIL_PRINTED_EXAMPLE = "iphone 17 pro max 128 gb warna silver"
 
+# Appended (via .replace(), not .format() -- the prompts below embed literal
+# JSON braces that would need escaping otherwise) to REWARD_DETAIL_PROMPT/
+# REWARD_TUNAI_DETAIL_PROMPT ONLY when a close-up crop is actually available
+# (see REWARD_DETAIL_CROP_TARGETS in extractors.py) -- mirrors the wording
+# already used for the 3 main-call close-ups in _build_direct_semantic_
+# prompt. When no crop is available (alignment failed, or this is the
+# non-yolos qwen3_vl_local caller which never passes one), the prompt is
+# used completely unchanged -- byte-identical to before this was added.
+_REWARD_CROP_NOTE = (
+    "\nYou are ALSO given a THIRD image: a zoomed-in close-up of that exact "
+    "line, cropped from the SAME filled document (image 2), to help you "
+    "read small handwriting more precisely. If it disagrees with what you "
+    "can see in the full document image, prefer the close-up -- it is the "
+    "higher-resolution view.\n"
+)
+
+
+def _with_crop_note(prompt):
+    return prompt.replace(
+        "Reply with EXACTLY this JSON shape",
+        _REWARD_CROP_NOTE + "\nReply with EXACTLY this JSON shape",
+    )
+
 
 def _extract_reward_detail_hosted(image_bgr, model, hf_token, timeout, provider=None):
     """Fires the REWARD_DETAIL_PROMPT follow-up call (see section comment
@@ -1082,7 +1212,7 @@ def _extract_reward_detail_hosted(image_bgr, model, hf_token, timeout, provider=
     return value if value not in ("", None) else None
 
 
-def _extract_reward_detail_local(image_bgr):
+def _extract_reward_detail_local(image_bgr, crop=None):
     """LOCAL counterpart of _extract_reward_detail_hosted -- same
     REWARD_DETAIL_PROMPT/printed-example guard/conditional-isolation policy
     (see the section comment above REWARD_DETAIL_PROMPT), but run through
@@ -1091,12 +1221,24 @@ def _extract_reward_detail_local(image_bgr):
     follow-up at all, so reward_non_tunai was always the mirrored choice-word
     placeholder for local Qwen even when the hosted engine could already get
     a real value. Never raises on failure (best-effort enrichment), same
-    contract as the hosted version."""
+    contract as the hosted version.
+
+    `crop` (optional): a close-up crop of the "sebutkan barang" blank (see
+    extractors.REWARD_DETAIL_CROP_TARGETS/_get_weak_field_crops), sent as a
+    3rd image at MAX_SIDE_DETAIL, ADDED to the existing template+document
+    pair -- never replacing them. None (the default -- e.g. when alignment
+    failed, or this is qwen3_vl_local which never computes crops) keeps this
+    function byte-identical to before this parameter existed."""
     template_img = _get_template_image()
+    images = [template_img, image_bgr]
+    max_sides = [MAX_SIDE_FULL, MAX_SIDE_FULL]
+    prompt = REWARD_DETAIL_PROMPT
+    if crop is not None:
+        images.append(crop)
+        max_sides.append(MAX_SIDE_DETAIL)
+        prompt = _with_crop_note(prompt)
     try:
-        data, _raw = _infer(
-            [template_img, image_bgr], REWARD_DETAIL_PROMPT, 80, [MAX_SIDE_FULL, MAX_SIDE_FULL],
-        )
+        data, _raw = _infer(images, prompt, 80, max_sides)
         item = data.get("reward_non_tunai_detail")
         value = item.get("value") if isinstance(item, dict) else item
     except Exception as exc:
@@ -1141,10 +1283,12 @@ The document's "Bentuk Reward" choice was already read as "tunai" (cash reward).
 "Nilai Reward (termasuk pajak) : Rp…………………………... (……………………………………)"
 This is a DIFFERENT line from "Nominal Penempatan" further up the page -- do not confuse the two. It has the same two-blank format: a Rupiah amount after "Rp", followed by that amount spelled out in words inside the parentheses.
 
-Read ONLY the customer's/bank staff's own handwritten amount written after "Nilai Reward (termasuk pajak) : Rp" on that specific line. Report it as DIGITS ONLY -- no "Rp", no thousands separators (dots/commas), and never the spelled-out words in parentheses -- e.g. answer "500000" for a handwritten "Rp500.000 (lima ratus ribu rupiah)". If that blank looks empty/unfilled, answer null. Do not invent or guess a plausible-looking number, and do not answer with the Nominal Penempatan amount instead.
+Read ONLY the customer's/bank staff's own handwritten amount written after "Nilai Reward (termasuk pajak) : Rp" on that specific line. Report reward_tunai_detail as DIGITS ONLY -- no "Rp", no thousands separators (dots/commas) -- e.g. answer "500000" for a handwritten "Rp500.000 (lima ratus ribu rupiah)". If that blank looks empty/unfilled, answer null. Do not invent or guess a plausible-looking number, and do not answer with the Nominal Penempatan amount instead.
+
+Separately, also transcribe reward_tunai_terbilang: the handwritten words inside the parentheses right after that digit amount, exactly as written (e.g. "lima ratus ribu rupiah" for the same example above) -- do not translate/convert, just transcribe. This is used only to cross-check the two match, so report null independently if the parentheses are empty/blank/illegible.
 
 Reply with EXACTLY this JSON shape, no markdown, no explanation:
-{"reward_tunai_detail":{"value":null,"confidence":0.0}}"""
+{"reward_tunai_detail":{"value":null,"confidence":0.0},"reward_tunai_terbilang":{"value":null,"confidence":0.0}}"""
 
 
 def _clean_reward_tunai_digits(value):
@@ -1157,10 +1301,23 @@ def _clean_reward_tunai_digits(value):
     return digits or None
 
 
+def _extract_reward_tunai_terbilang_text(value):
+    """Cleanup for reward_tunai_terbilang's raw model answer -- text field,
+    no digit coercion (unlike _clean_reward_tunai_digits), just the normal
+    whitespace/blank normalization already used elsewhere in this file."""
+    if value in (None, ""):
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text or None
+
+
 def _extract_reward_tunai_detail_hosted(image_bgr, model, hf_token, timeout, provider=None):
     """Hosted counterpart of _extract_reward_detail_hosted, for the tunai
     amount instead of the non-tunai description (see section comment above
-    REWARD_TUNAI_DETAIL_PROMPT). Never raises on failure."""
+    REWARD_TUNAI_DETAIL_PROMPT). Never raises on failure. Returns (value,
+    terbilang_text) -- V21 added the second element (see terbilang.py) to
+    cross-check the digit amount against its own spelled-out counterpart on
+    the SAME line; either half degrades independently to None on failure."""
     from huggingface_hub import InferenceClient
 
     template_uri = _get_template_data_uri()
@@ -1175,38 +1332,62 @@ def _extract_reward_tunai_detail_hosted(image_bgr, model, hf_token, timeout, pro
     }]
     try:
         client = InferenceClient(token=hf_token, timeout=timeout, provider=provider)
-        response = client.chat_completion(messages=messages, model=model, max_tokens=40, temperature=0)
+        response = client.chat_completion(messages=messages, model=model, max_tokens=80, temperature=0)
         raw_text = (response.choices[0].message.content or "") if response.choices else ""
         data = _extract_json(raw_text)
         item = data.get("reward_tunai_detail")
         value = item.get("value") if isinstance(item, dict) else item
+        terbilang_item = data.get("reward_tunai_terbilang")
+        terbilang_raw = terbilang_item.get("value") if isinstance(terbilang_item, dict) else terbilang_item
     except Exception as exc:
         print(f"[qwen3_vl_hosted] reward_tunai_detail follow-up failed (non-fatal): {exc}")
-        return None
+        return None, None
 
     value = _clean_reward_tunai_digits(value)
-    print(f"[qwen3_vl_hosted] reward_tunai_detail follow-up result: {value!r}")
-    return value
+    terbilang = _extract_reward_tunai_terbilang_text(terbilang_raw)
+    print(f"[qwen3_vl_hosted] reward_tunai_detail follow-up result: {value!r} (terbilang: {terbilang!r})")
+    return value, terbilang
 
 
-def _extract_reward_tunai_detail_local(image_bgr):
+def _extract_reward_tunai_detail_local(image_bgr, crop=None):
     """LOCAL counterpart of _extract_reward_tunai_detail_hosted, run through
     the on-device model via _infer() instead of an HF API call. Never raises
-    on failure."""
+    on failure. Returns (value, terbilang_text) -- see hosted counterpart's
+    docstring.
+
+    `crop` (optional): a close-up crop of the "Nilai Reward (termasuk
+    pajak)" Rp line (see extractors.REWARD_DETAIL_CROP_TARGETS/
+    _get_weak_field_crops), sent as a 3rd image at MAX_SIDE_DETAIL, ADDED to
+    the existing template+document pair -- never replacing them. Real user
+    report: this follow-up was still returning null even after
+    REWARD_TUNAI_DETAIL_PROMPT was rewritten to target the right line (see
+    section comment above) -- root cause is the SAME class of problem
+    already fixed for nama_nasabah/nomor_rekening/nominal_penempatan via a
+    close-up crop (V21): a single handwritten line is too small to read
+    reliably inside a full page at MAX_SIDE_FULL. None (the default) keeps
+    this function byte-identical to before this parameter existed."""
     template_img = _get_template_image()
+    images = [template_img, image_bgr]
+    max_sides = [MAX_SIDE_FULL, MAX_SIDE_FULL]
+    prompt = REWARD_TUNAI_DETAIL_PROMPT
+    if crop is not None:
+        images.append(crop)
+        max_sides.append(MAX_SIDE_DETAIL)
+        prompt = _with_crop_note(prompt)
     try:
-        data, _raw = _infer(
-            [template_img, image_bgr], REWARD_TUNAI_DETAIL_PROMPT, 40, [MAX_SIDE_FULL, MAX_SIDE_FULL],
-        )
+        data, _raw = _infer(images, prompt, 80, max_sides)
         item = data.get("reward_tunai_detail")
         value = item.get("value") if isinstance(item, dict) else item
+        terbilang_item = data.get("reward_tunai_terbilang")
+        terbilang_raw = terbilang_item.get("value") if isinstance(terbilang_item, dict) else terbilang_item
     except Exception as exc:
         print(f"[qwen3_vl_local] reward_tunai_detail follow-up failed (non-fatal): {exc}")
-        return None
+        return None, None
 
     value = _clean_reward_tunai_digits(value)
-    print(f"[qwen3_vl_local] reward_tunai_detail follow-up result: {value!r}")
-    return value
+    terbilang = _extract_reward_tunai_terbilang_text(terbilang_raw)
+    print(f"[qwen3_vl_local] reward_tunai_detail follow-up result: {value!r} (terbilang: {terbilang!r})")
+    return value, terbilang
 
 
 def extract_direct_semantic_hosted_majority(image_bgr, model=None, hf_token=None, timeout=None,
@@ -1263,7 +1444,7 @@ def extract_direct_semantic_hosted_majority(image_bgr, model=None, hf_token=None
     # detail_hosted) -- ONLY fires when bentuk_reward is non_tunai, so it
     # costs nothing extra for the (in this dataset, universal) tunai case.
     detail_value = None
-    tunai_detail_value = None
+    tunai_detail_value, tunai_terbilang_value = None, None
     reward_choice = final_clean.get("bentuk_reward", {}).get("value")
     if reward_choice == "non_tunai":
         detail_value = _extract_reward_detail_hosted(
@@ -1274,12 +1455,13 @@ def extract_direct_semantic_hosted_majority(image_bgr, model=None, hf_token=None
         # V19f: symmetric follow-up for the cash amount (see section comment
         # above REWARD_TUNAI_DETAIL_PROMPT) -- this dataset's ground truth is
         # ~100% tunai, so THIS is the branch that actually fires in practice.
-        tunai_detail_value = _extract_reward_tunai_detail_hosted(
+        tunai_detail_value, tunai_terbilang_value = _extract_reward_tunai_detail_hosted(
             image_bgr, model=first_meta["model"], hf_token=hf_token,
             timeout=timeout, provider=first_meta.get("provider"),
         )
     final_clean["reward_non_tunai_detail"] = {"value": detail_value, "confidence": 0.0}
     final_clean["reward_tunai_detail"] = {"value": tunai_detail_value, "confidence": 0.0}
+    final_clean["reward_tunai_terbilang"] = {"value": tunai_terbilang_value, "confidence": 0.0}
 
     return final_clean, first_raw_text, meta
 

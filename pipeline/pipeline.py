@@ -44,12 +44,12 @@ import re
 
 import cv2
 
-import preprocessing as prep
-import ocr
-import postprocessing as post
-import dynamic_extraction as dynamic
-import vlm
-from comparison import COLUMN_FIELD_MAP, FIELD_DATA_TYPES, _normalize_for_compare
+from pipeline import preprocessing as prep
+from pipeline import ocr
+from pipeline import postprocessing as post
+from pipeline import dynamic_extraction as dynamic
+from pipeline import vlm
+from pipeline.comparison import COLUMN_FIELD_MAP, FIELD_DATA_TYPES, _normalize_for_compare
 
 # Re-export supaya app.py bisa tetap memanggil pipeline.load_document /
 # pipeline.TEMPLATE_PATH seperti sebelumnya.

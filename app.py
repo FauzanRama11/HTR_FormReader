@@ -56,18 +56,15 @@ try:
 except ImportError:
     pass
 
-import comparison
-import data_input
-import extractors
-import live_evaluation
-import pipeline
-import preprocessing as prep
-import postprocessing as post
+from pipeline import comparison
+from core import data_input
+import extractors.extractors as extractors
+from eval_tools import live_evaluation
+import pipeline.pipeline as pipeline
+from pipeline import preprocessing as prep
+from pipeline import postprocessing as post
+from core.paths import UPLOAD_DIR, OUTPUT_DIR, STATIC_DIR
 
-BASE_DIR = Path(__file__).parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-OUTPUT_DIR = BASE_DIR / "outputs"
-STATIC_DIR = BASE_DIR / "static"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 

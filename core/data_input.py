@@ -9,9 +9,10 @@ Sumber data untuk Tab "Excel / Google Spreadsheet":
 
 import os
 import re
-from pathlib import Path
 
 import pandas as pd
+
+from core.paths import DOWNLOAD_DIR
 
 # Kolom yang dipakai, sesuai array kolom pada spreadsheet_extract.ipynb.
 SPREADSHEET_COLUMNS = [
@@ -43,8 +44,6 @@ MISSING_VALUES = {"", "none", "nan", "null", "n/a", "na", "-", "--"}
 # TIDAK membuat index baru (1..N) supaya nomor tetap sama seperti di sumber.
 INDEX_COLUMN_CANDIDATES = ["no", "no.", "nomor", "no urut", "index", "id", "record"]
 
-BASE_DIR = Path(__file__).resolve().parent
-DOWNLOAD_DIR = BASE_DIR / "downloaded_documents"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 # Cache di memori: file_id -> path lokal. Mencegah download dokumen Drive

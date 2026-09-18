@@ -12,7 +12,7 @@ import re
 import cv2
 import numpy as np
 
-from preprocessing import (
+from pipeline.preprocessing import (
     CHOICE_GROUPS, SIGNATURE_CONFIG, FIELD_CONFIG, FIELD_ORDER,
     locate_anchor_offset, resolve_roi, ink_change_ratio, difference_mask,
     norm_bbox_to_px, _shift_bbox, _crop, _remove_line_noise,
@@ -483,10 +483,14 @@ def _calendar_month_diff(d1, d2):
     return (d2.year - d1.year) * 12 + (d2.month - d1.month)
 
 
-def derive_tenor_from_range(raw_text):
-    """Ekstrak DUA tanggal dari teks rentang_tenor, hitung selisih bulan
-    KALENDER (year*12+month, bukan hari/30), lalu petakan ke opsi tenor
-    terdekat (1/3/6) dengan toleransi kecil. Return (value_atau_None, reason).
+def tenor_from_date_pair(d1, d2):
+    """Bagian INTI derive_tenor_from_range (selisih bulan KALENDER -> opsi
+    tenor terdekat), diekstrak jadi fungsi terpisah supaya caller yg SUDAH
+    punya 2 objek `datetime.date` valid (mis. extractors.py dari tanggal ISO
+    hasil VLM) bisa panggil ini LANGSUNG -- tanpa lewat _extract_dates()'s
+    regex text-parser, yg cuma relevan utk teks OCR/hasil gabungan V18.
+    Return (value_atau_None, reason), format PERSIS sama dgn
+    derive_tenor_from_range supaya caller lama tidak perlu berubah.
 
     V19f: kalau tanggal kedua < tanggal pertama (rentang terbalik), TIDAK
     PERNAH ditukar diam-diam -- bisa jadi urutan baca OCR/spasial yang salah,
@@ -494,13 +498,6 @@ def derive_tenor_from_range(raw_text):
     "reversed_date_range" (value None) supaya caller (comparison.validate_tenor,
     resolve_tenor_source) menandainya REVIEW/uncertain, dan TIDAK PERNAH
     menurunkan tenor dari rentang yang tidak valid ini."""
-    if not raw_text:
-        return None, "rentang_tenor_kosong"
-    dates = _extract_dates(raw_text)
-    if len(dates) < 2:
-        return None, "tidak_bisa_ekstrak_2_tanggal_dari_rentang_tenor"
-
-    d1, d2 = dates[0], dates[1]
     if d2 < d1:
         return None, "reversed_date_range"
 
@@ -512,6 +509,21 @@ def derive_tenor_from_range(raw_text):
     if abs(nearest - months) > TENOR_TOLERANCE_MONTHS:
         return None, f"selisih_{months}_bulan_tidak_dekat_opsi_manapun"
     return nearest, f"derived_dari_rentang_tenor_{months}_bulan_kalender"
+
+
+def derive_tenor_from_range(raw_text):
+    """Ekstrak DUA tanggal dari teks rentang_tenor (regex text-parser, utk
+    jalur V18/OCR yg cuma punya teks gabungan, BUKAN 2 tanggal ISO terpisah
+    -- lihat tenor_from_date_pair utk caller yg sudah punya objek date),
+    lalu delegasikan sisa logic (selisih bulan -> opsi tenor terdekat) ke
+    tenor_from_date_pair. Return (value_atau_None, reason)."""
+    if not raw_text:
+        return None, "rentang_tenor_kosong"
+    dates = _extract_dates(raw_text)
+    if len(dates) < 2:
+        return None, "tidak_bisa_ekstrak_2_tanggal_dari_rentang_tenor"
+
+    return tenor_from_date_pair(dates[0], dates[1])
 
 
 def resolve_tenor_source(groups, raw_results):

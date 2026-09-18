@@ -5,13 +5,19 @@ records in assets/ocr_evaluation.xlsx. NOT wired into extractors.py/evaluation.p
 contract) as-is. Writes one row per record to local_qwen_eval_results.csv as it
 goes (so a crash/OOM partway doesn't lose prior progress)."""
 import csv
+import sys
 import time
+from pathlib import Path
 
 import pandas as pd
 
-import data_input as di
-import preprocessing as prep
-import vlm
+# Dijalankan langsung (`python eval_tools/local_qwen_eval.py`), jadi
+# sys.path[0] = folder eval_tools/ ini sendiri -- root harus ditambah manual.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core import data_input as di
+from pipeline import preprocessing as prep
+from pipeline import vlm
 
 FIELDS = ["nama_nasabah", "nomor_rekening", "nominal_penempatan", "tenor", "bentuk_reward",
           "signature_nasabah", "signature_unit_kerja"]

@@ -50,20 +50,25 @@ Design (see handover.md for the full writeup):
     `_compute_gemini_cost`.
 """
 
+import datetime
 import json
 import os
+import re
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 import cv2
 
-import config
-import pipeline
-import postprocessing as post
-import preprocessing as prep
-import signature_detector
-import vlm
+from core import config
+import pipeline.pipeline as pipeline
+from pipeline import postprocessing as post
+from pipeline import preprocessing as prep
+from extractors import signature_detector
+from pipeline import vlm
 
 # ============================================================================
 # CANONICAL SCHEMA (task spec) + SHARED EXTRACTION INSTRUCTION
@@ -271,10 +276,13 @@ _ID_MONTHS = {
 
 
 def _format_id_date(iso_str):
-    """'2026-01-01' -> '1 Januari 2026' -- confirmed parseable by the
-    EXISTING, REUSED postprocessing._extract_dates() (Indonesian month-name
-    regex), so derive_tenor_from_range() works unmodified on AI-extracted
-    dates exactly as it does on OCR'd handwritten text."""
+    """'2026-01-01' -> '1 Januari 2026' -- DISPLAY ONLY (shown in the UI
+    fields table as rentang_tenor.value/raw). Used to be also re-parsed
+    back into dates by postprocessing._extract_dates()'s regex -- that
+    round trip is gone (see _parse_iso_date/post.tenor_from_date_pair
+    below, which the actual tenor derivation now uses directly on the
+    ISO string) -- this function no longer needs to produce anything
+    machine-parseable, only human-readable."""
     if not iso_str:
         return None
     try:
@@ -282,6 +290,23 @@ def _format_id_date(iso_str):
         return f"{d} {_ID_MONTHS[m]} {y}"
     except Exception:
         return None
+
+
+def _parse_iso_date(iso_str):
+    """Parse the VLM's 'YYYY-MM-DD' output directly into a date object --
+    replaces the old digits -> Indonesian-month-text -> regex-reparse round
+    trip for the actual tenor-from-range CALCULATION (_format_id_date above
+    is kept only for the human-readable display string, no longer for
+    anything that gets parsed back). Returns (date_or_None, reason_or_None)
+    -- reason is set ONLY on a genuine parse failure (malformed ISO string),
+    kept distinct from "field was empty/null" so eval output can finally
+    tell the two apart instead of both collapsing into the same "N/A"."""
+    if not iso_str:
+        return None, None
+    try:
+        return datetime.date.fromisoformat(str(iso_str).strip()), None
+    except (ValueError, TypeError):
+        return None, "iso_tanggal_tidak_valid"
 
 
 def _field_entry(common, name):
@@ -298,6 +323,33 @@ def _field_entry(common, name):
         status = raw.get("status") or ("not_detected" if value in (None, "") else "detected")
         return value, status, raw.get("confidence")
     return raw, ("not_detected" if raw in (None, "") else "detected"), None
+
+
+# Real BRI account numbers, measured directly against ground truth
+# (assets/ocr_evaluation.xlsx, all 25 records): consistently 14-16 digits
+# (the 14-digit cases are almost certainly 15-16-digit numbers that lost a
+# leading zero to Excel's numeric coercion -- the same class of bug already
+# fixed once for comparison in V18, see comparison.py's numeric branch).
+# 13-17 gives a small margin on both sides rather than the exact observed
+# range. Scoped to nomor_rekening ONLY (a dedicated check here, NOT a change
+# to postprocessing.validate_value's generic 4-30 digit numeric-field check,
+# which stays as-is for every other numeric field).
+_ACCOUNT_NUMBER_LENGTH_RANGE = (13, 17)
+
+
+def _is_plausible_account_number(value):
+    """False only when a NON-EMPTY value's digit count falls outside the
+    real-data-informed range above -- an empty/None value is left alone
+    (the normal not_detected path already handles that; this check only
+    catches a CONFIDENTLY WRONG-LENGTH answer, e.g. a truncated read or a
+    merged-with-neighbor-row value)."""
+    if value is None or value == "":
+        return True
+    digits = re.sub(r"\D", "", str(value))
+    if not digits:
+        return True
+    lo, hi = _ACCOUNT_NUMBER_LENGTH_RANGE
+    return lo <= len(digits) <= hi
 
 
 # ============================================================================
@@ -353,6 +405,15 @@ def adapt_common_to_pipeline_shape(common, source, document_path, prepared_image
     put("nama_nasabah", nama, nama_status, confidence=nama_conf)
 
     rekening, rekening_status, rekening_conf = _field_entry(common, "nomor_rekening")
+    if rekening is not None and not _is_plausible_account_number(rekening):
+        # Real-data length sanity gate (see _is_plausible_account_number) --
+        # same "honest not_detected beats a confidently wrong-shaped value"
+        # philosophy as V18 Fix 3's identity-area content-type gate
+        # (postprocessing._identity_type_mismatch): a wrong-length answer is
+        # more likely a truncated/merged-with-neighbor-row read than a
+        # genuine (if unusual) account number, so route it to review instead
+        # of comparing it as-is.
+        rekening, rekening_status = None, "not_detected"
     put("nomor_rekening", str(rekening) if rekening is not None else None, rekening_status, confidence=rekening_conf)
 
     unit, unit_status, unit_conf = _field_entry(common, "unit_kerja_pengelola_rekening")
@@ -360,19 +421,42 @@ def adapt_common_to_pipeline_shape(common, source, document_path, prepared_image
 
     nominal, nominal_status, nominal_conf = _field_entry(common, "nominal_penempatan")
     put("nominal_penempatan", nominal, nominal_status, confidence=nominal_conf)
+    # V21 -- terbilang (spelled-out words) cross-check evidence, diagnostic
+    # only (see comparison.validate_nominal_terbilang): NOT one of
+    # FIELD_ORDER's compared fields, just carried through raw_results so the
+    # validator/evaluation can read it. Harmlessly absent for Gemini/Mistral
+    # (no such key in their `common` schema -- _field_entry returns
+    # (None, "not_detected", None) same as any other missing key).
+    nominal_terbilang, nominal_terbilang_status, _ntc = _field_entry(common, "nominal_penempatan_terbilang")
+    put("nominal_penempatan_terbilang", nominal_terbilang, nominal_terbilang_status)
 
     tenor, tenor_status, tenor_conf = _field_entry(common, "tenor_penempatan")
     tanggal_mulai, _tm_status, _tm_conf = _field_entry(common, "tanggal_mulai")
     tanggal_selesai, _ts_status, _ts_conf = _field_entry(common, "tanggal_selesai")
 
     range_raw = None
-    d1, d2 = _format_id_date(tanggal_mulai), _format_id_date(tanggal_selesai)
-    if d1 and d2:
-        range_raw = f"{d1} s/d {d2}"
+    d1_text, d2_text = _format_id_date(tanggal_mulai), _format_id_date(tanggal_selesai)
+    if d1_text and d2_text:
+        range_raw = f"{d1_text} s/d {d2_text}"
+    d1_date, d1_err = _parse_iso_date(tanggal_mulai)
+    d2_date, d2_err = _parse_iso_date(tanggal_selesai)
+    if range_raw:
+        range_reason = "derived_from_tanggal_mulai_selesai"
+    else:
+        # Distinguish "field genuinely blank" from "VLM output wasn't valid
+        # ISO" -- both used to collapse into the same "not_detected"/N/A
+        # with no way to tell them apart in eval output.
+        range_reason = d1_err or d2_err or "tanggal_mulai_atau_selesai_kosong"
     final_results["rentang_tenor"] = {
         "value": range_raw, "raw": range_raw,
+        # ISO strings (JSON-safe -- NOT date objects, this dict ends up in
+        # raw_json API responses/exports), kept ONLY when both parsed as
+        # valid ISO -- lets comparison.validate_tenor compute the month-diff
+        # directly (postprocessing.tenor_from_date_pair) instead of regex-
+        # parsing this same "raw" display text back into dates.
+        "dates_iso": (tanggal_mulai, tanggal_selesai) if d1_date and d2_date else None,
         "status": "detected" if range_raw else "not_detected",
-        "confidence": None, "source": source, "reason": "derived_from_tanggal_mulai_selesai",
+        "confidence": None, "source": source, "reason": range_reason,
     }
     tenor_choice_status = "detected" if tenor is not None else "review"
     final_results["tenor_penempatan"] = {
@@ -384,22 +468,40 @@ def adapt_common_to_pipeline_shape(common, source, document_path, prepared_image
     reward = reward if reward in ("tunai", "non_tunai") else None
     # reward_non_tunai_detail/reward_tunai_detail: OPTIONAL keys, only
     # present when the caller is Qwen (extractors._adapt_qwen_to_common) --
-    # absent for Gemini/Mistral, whose schema has no separate detail field,
-    # so _field_entry harmlessly returns (None, "not_detected", None) for
-    # them and behavior below is UNCHANGED (falls straight to the
-    # mirrored-placeholder branch, same as before these fields existed).
+    # absent for Gemini/Mistral, whose schema has no separate detail field.
     reward_detail, _detail_status, _detail_conf = _field_entry(common, "reward_non_tunai_detail")
     reward_tunai_detail, _tunai_detail_status, _tunai_detail_conf = _field_entry(common, "reward_tunai_detail")
-    non_tunai_value = reward_detail if (reward == "non_tunai" and reward_detail) else (
-        reward if reward == "non_tunai" else None
-    )
-    tunai_value = reward_tunai_detail if (reward == "tunai" and reward_tunai_detail) else (
-        reward if reward == "tunai" else None
-    )
-    put("reward_tunai", tunai_value,
-        "detected" if reward == "tunai" else "not_detected")
-    put("reward_non_tunai", non_tunai_value,
-        "detected" if reward == "non_tunai" else "not_detected")
+    # V21 -- terbilang cross-check evidence for the cash-reward amount, same
+    # diagnostic-only treatment as nominal_penempatan_terbilang above.
+    reward_tunai_terbilang, reward_tunai_terbilang_status, _rttc = _field_entry(common, "reward_tunai_terbilang")
+    put("reward_tunai_terbilang", reward_tunai_terbilang, reward_tunai_terbilang_status)
+
+    # V22 fix -- mirrored-placeholder bug: reward_tunai/reward_non_tunai used
+    # to fall back to the literal CHOICE STRING ("tunai"/"non_tunai") itself
+    # whenever the real detail wasn't read, so the field looked "filled"
+    # with a fake value instead of honestly null (and comparison.
+    # validate_reward's tunai_filled/non_tunai_filled evidence check was
+    # fooled into treating a non-answer as "read"). Only engines that never
+    # attempt separate detail extraction at all (Gemini/Mistral -- their
+    # `common` schema has no "reward_tunai_detail"/"reward_non_tunai_detail"
+    # key whatsoever) still get the mirrored placeholder, since for them
+    # there is no real detail value to ever report instead; Qwen DOES
+    # attempt real extraction (see vlm._run_local_reward_detail_followup),
+    # so a None there is a genuine "couldn't read it," not "not applicable,"
+    # and must stay null rather than being overwritten.
+    detail_extraction_attempted = isinstance(common, dict) and "reward_tunai_detail" in common
+    if detail_extraction_attempted:
+        non_tunai_value = reward_detail if (reward == "non_tunai" and reward_detail) else None
+        tunai_value = reward_tunai_detail if (reward == "tunai" and reward_tunai_detail) else None
+    else:
+        non_tunai_value = reward_detail if (reward == "non_tunai" and reward_detail) else (
+            reward if reward == "non_tunai" else None
+        )
+        tunai_value = reward_tunai_detail if (reward == "tunai" and reward_tunai_detail) else (
+            reward if reward == "tunai" else None
+        )
+    put("reward_tunai", tunai_value, "detected" if tunai_value else "not_detected")
+    put("reward_non_tunai", non_tunai_value, "detected" if non_tunai_value else "not_detected")
     reward_choice_status = "detected" if reward is not None else "review"
     final_results["bentuk_reward"] = {
         "value": reward, "status": reward_choice_status, "source": source, "reason": "ai_extracted",
@@ -648,6 +750,166 @@ def _qwen_prepare_image(document_path):
     return image_bgr
 
 
+# V21 -- the 3 fields most often misread by DIRECT_SEMANTIC_PROMPT on the
+# full, downscaled page (handover.md V16 full-eval: nama_nasabah 38.9%,
+# nomor_rekening 57.9%, nominal_penempatan 47.6% -- the weakest of the 5
+# compared fields by a wide margin). Order here is also the order the
+# crops are described in the prompt (see vlm._build_direct_semantic_prompt).
+WEAK_FIELD_CROP_TARGETS = ("nama_nasabah", "nomor_rekening", "nominal_penempatan")
+
+# Wider than preprocessing.CROP_PAD_RATIO (0.20) because these crops use
+# ONLY the static, template-relative value_bbox (see _get_weak_field_crops'
+# docstring for why the OCR-based per-row refinement isn't used here) --
+# more padding compensates for the lack of per-row drift correction.
+#
+# Per-field (pad_x_ratio, pad_y_ratio) -- NOT one flat ratio for all three,
+# since the three fields don't have the same neighbor-bleed risk:
+# nama_nasabah is the TOP of the 3 zero-gap identity rows (bleeds down
+# only), nominal_penempatan sits in a roomier region (visually confirmed
+# clean crops at 0.5/0.5 in the prior session), but nomor_rekening is the
+# MIDDLE row -- a real neighbor row sits immediately above AND below it
+# with zero template gap (verified pixel-exact: nama_nasabah's bottom ==
+# nomor_rekening's top == unit_kerja's top on a real aligned document) --
+# so a full 0.5 vertical pad on this one field is the most likely of the
+# three to pull a neighboring row's handwriting into the crop. Horizontal
+# padding stays wide for all three (account numbers can run long/shift
+# sideways; horizontal padding doesn't risk pulling in a DIFFERENT row).
+WEAK_FIELD_CROP_PAD_RATIO = {
+    "nama_nasabah": (0.5, 0.5),
+    "nomor_rekening": (0.5, 0.2),
+    "nominal_penempatan": (0.5, 0.5),
+}
+
+# Close-up crops for the reward-detail FOLLOW-UP call only (vlm.
+# REWARD_TUNAI_DETAIL_PROMPT/REWARD_DETAIL_PROMPT) -- separate constant from
+# WEAK_FIELD_CROP_TARGETS above, which drives the MAIN call's extra_crops/
+# prompt (vlm._build_direct_semantic_prompt) and must not be touched here.
+# Reuses preprocessing.FIELD_CONFIG's already-measured, template-relative
+# value_bbox for "reward_tunai" (the "Nilai Reward (termasuk pajak)" Rp line)
+# and "reward_non_tunai" (the "sebutkan barang" blank) -- same V13-V18
+# geometry the frozen V18 pipeline already uses, just never wired into the
+# VLM follow-up call before.
+REWARD_DETAIL_CROP_TARGETS = ("reward_tunai", "reward_non_tunai")
+
+REWARD_DETAIL_CROP_PAD_RATIO = {
+    # reward_tunai is the ONE field with confirmed 2nd-line overflow (its
+    # handwritten terbilang words wrap below the digit amount -- see
+    # preprocessing.GROWABLE_FIELDS / handover.md V15 SS4b) -- wider
+    # vertical pad than the other close-up crops to loosely include that
+    # second line too. reward_non_tunai's blank is a single printed line,
+    # so it gets the same pad as the other single-line weak fields.
+    "reward_tunai": (0.5, 1.0),
+    "reward_non_tunai": (0.5, 0.5),
+}
+
+def _pad_bbox(bbox, pad_x_ratio, pad_y_ratio, shape):
+    """Expand a pixel bbox by separate x/y ratios (same purpose/ratio
+    convention as preprocessing.CROP_PAD_RATIO, reused directly rather than
+    inventing a new margin constant), clipped to image bounds."""
+    x1, y1, x2, y2 = bbox
+    pad_x, pad_y = (x2 - x1) * pad_x_ratio, (y2 - y1) * pad_y_ratio
+    img_h, img_w = shape[:2]
+    return (
+        max(0, int(x1 - pad_x)), max(0, int(y1 - pad_y)),
+        min(img_w, int(x2 + pad_x)), min(img_h, int(y2 + pad_y)),
+    )
+
+
+def _get_weak_field_crops(document_path):
+    """Best-effort tight close-up crops of WEAK_FIELD_CROP_TARGETS PLUS
+    REWARD_DETAIL_CROP_TARGETS (one combined alignment pass, same
+    aligned_img/shape for both), for the qwen3_vl_local_yolos hybrid engine
+    ONLY (extractors.run_qwen3_vl_local_yolos). The first group is sent as
+    EXTRA images alongside the existing template+document pair in the MAIN
+    call (see vlm.extract_direct_semantic_local's `extra_crops` param); the
+    reward group is sent separately to the reward-detail FOLLOW-UP call (see
+    vlm.extract_direct_semantic_local's `reward_crops` param) -- the two
+    never mix, and neither ever replaces an existing image, only adds to it.
+    Does NOT change the main full-page image sent to Qwen in any way
+    (_qwen_prepare_image's output is untouched) -- this can only ADD
+    information to the same single call.
+
+    Reuses the EXISTING, already-tuned V13-V17 ROI geometry
+    (prep.prepare_and_align for the perspective/homography warp, then
+    prep.FIELD_CONFIG's static, template-relative value_bbox for each
+    field) -- no new localization logic. Deliberately does NOT call
+    dynamic.extract_dynamic_fields()'s OCR-based per-row refinement
+    (title-anchor/section-transform/row-clustering, V14-V17): that path
+    calls PaddleOCR internally, which was found to be broken in this
+    environment independent of anything here (`import ocr;
+    ocr.get_ocr_engine()` alone raises "partially initialized module
+    'paddle' has no attribute 'tensor' (circular import)" -- a pre-existing
+    paddleocr/paddlex/environment bug, also affecting the V18 engine, out
+    of scope to fix here). The static box is looser (no per-row drift
+    correction), so PAD_RATIO below is wider than preprocessing.
+    CROP_PAD_RATIO to compensate -- these crops only need to loosely
+    contain the right handwriting for a VLM close-up, not pixel-exact
+    framing. If dynamic_extraction's OCR path is fixed later, swapping
+    this to prefer dynamic.extract_dynamic_fields()'s roi_boxes (falling
+    back to this static box) would be a natural follow-up.
+
+    No neighbor-boundary clamp (unlike prep._clamp_field_box_y, used by the
+    V18 OCR pipeline for identity_area): TRIED and REVERTED -- the 3
+    identity_area rows have a confirmed ZERO gap between their template
+    value_bbox y-ranges (nama_nasabah's bottom == nomor_rekening's top,
+    verified directly: 311px == 311px on a real aligned document), and real
+    handwriting routinely sits BELOW that administrative boundary (V14/V15's
+    whole "row drift"/overflow finding). Clamping to the neighbor boundary
+    cut the crop to LESS than the field's own unpadded box height on a real
+    document, hiding the very handwriting this feature exists to surface.
+    Padding without a clamp can occasionally show a sliver of the
+    neighboring row instead -- acceptable here because this crop is a
+    SUPPLEMENTARY close-up for a VLM that also sees the full page and is
+    told what to look for, not a pixel-diff OCR window that gets confused by
+    any extra ink.
+
+    Best-effort/never raises: template alignment can fail on a document
+    (the same class of failure V18 already tolerates for its own pipeline),
+    in which case this returns ({}, None) and the caller falls back to
+    exactly today's 2-image behavior.
+
+    Returns (crops, choice_ink_diff) -- `choice_ink_diff` (added alongside
+    the choice-field ink-diff cross-check) is postprocessing.process_choices'
+    raw `groups` output (pixel ink-change detection, tenor_penempatan/
+    bentuk_reward, the SAME frozen-V18 mechanism, never OCR) computed from
+    this SAME alignment pass -- None if alignment failed, same best-effort
+    contract as `crops`. See extractors._choice_ink_diff_agrees_with_vlm's
+    caller for how this is used (diagnostic-only for now, see handover.md)."""
+    try:
+        template_img = vlm._get_template_image()
+        filled_raw = prep.load_document(str(document_path))
+        aligned_img, _, alignment = prep.prepare_and_align(str(document_path), filled_raw, template_img)
+        shape = aligned_img.shape
+    except Exception:
+        return {}, None
+
+    choice_ink_diff = None
+    try:
+        coverage_mask = alignment.pop("coverage_mask", None)
+        template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
+        aligned_gray = cv2.cvtColor(aligned_img, cv2.COLOR_BGR2GRAY)
+        choice_ink_diff, _raw = post.process_choices(
+            template_img, aligned_img, template_gray, aligned_gray, shape, coverage_mask=coverage_mask,
+        )
+    except Exception:
+        choice_ink_diff = None
+
+    crops = {}
+    pad_ratios = {**WEAK_FIELD_CROP_PAD_RATIO, **REWARD_DETAIL_CROP_PAD_RATIO}
+    for field_name in WEAK_FIELD_CROP_TARGETS + REWARD_DETAIL_CROP_TARGETS:
+        try:
+            bbox = prep.norm_bbox_to_px(prep.FIELD_CONFIG[field_name]["value_bbox"], shape)
+            pad_x_ratio, pad_y_ratio = pad_ratios[field_name]
+            x1, y1, x2, y2 = _pad_bbox(bbox, pad_x_ratio, pad_y_ratio, shape)
+            crop = aligned_img[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+            crops[field_name] = crop.copy()
+        except Exception:
+            continue
+    return crops, choice_ink_diff
+
+
 # V19f: DIRECT_SEMANTIC_PROMPT's signature fields already return a genuine
 # 0.0-1.0 self-rated confidence (vlm._parse_direct_semantic_json) -- this
 # threshold recovers a real "uncertain" 3rd state from it instead of
@@ -692,6 +954,92 @@ def _is_extraction_collapsed(qwen_result):
     )
 
 
+# Generous timeout: a fresh subprocess pays the FULL model-load cost again
+# (~15-19s measured on RTX4060) on top of one inference call (~20-45s), plus
+# headroom for a slower/colder disk cache. This path only runs on the ~24%
+# of documents that hit the collapse bug, so the extra wall-clock is
+# accepted there in exchange for a real chance at recovering the document.
+COLLAPSE_RETRY_TIMEOUT_S = int(os.environ.get("COLLAPSE_RETRY_TIMEOUT_S", "240"))
+_COLLAPSE_RETRY_WORKER = Path(__file__).resolve().parent / "collapse_retry_worker.py"
+
+
+def _retry_collapsed_in_subprocess(image_bgr, extra_crops=None, reward_crops=None):
+    """One-shot retry of vlm.extract_direct_semantic_local in a BRAND-NEW
+    Python process (see collapse_retry_worker.py's docstring for why an
+    in-process retry would be pointless: the collapse is deterministic
+    within a process, only variable across process launches).
+
+    `extra_crops` (V21, optional): the SAME (field_name, image_bgr) list the
+    original call used (see run_qwen3_vl_local_yolos) -- passed through via a
+    JSON manifest so the retry sees an IDENTICAL image set/prompt, not a
+    smaller 2-image call that would make the retry a different experiment.
+
+    `reward_crops` (optional): the SAME {field_name: image_bgr} dict the
+    original call used for the reward-detail follow-up (see
+    REWARD_DETAIL_CROP_TARGETS) -- passed through the same manifest so a
+    collapse-retry doesn't silently lose this improvement either.
+
+    Returns (qwen_result, raw_text) on a successful, non-collapsed retry,
+    or None on ANY failure (subprocess error, timeout, malformed output, or
+    a retry that itself collapsed again) -- the caller always has a safe
+    fallback (the original collapsed result) and this function never raises."""
+    extra_crops = extra_crops or []
+    reward_crops = reward_crops or {}
+    reward_items = list(reward_crops.items())
+    tmp_dir = tempfile.mkdtemp(prefix="collapse_retry_")
+    image_path = os.path.join(tmp_dir, "image.png")
+    manifest_path = os.path.join(tmp_dir, "manifest.json")
+    output_path = os.path.join(tmp_dir, "result.json")
+    crop_paths = [os.path.join(tmp_dir, f"crop_{i}.png") for i in range(len(extra_crops))]
+    reward_crop_paths = [os.path.join(tmp_dir, f"reward_crop_{i}.png") for i in range(len(reward_items))]
+    try:
+        if not cv2.imwrite(image_path, image_bgr):
+            return None
+        crops_manifest = []
+        for (field_name, crop_img), crop_path in zip(extra_crops, crop_paths):
+            if not cv2.imwrite(crop_path, crop_img):
+                return None
+            crops_manifest.append({"field": field_name, "path": crop_path})
+        reward_crops_manifest = []
+        for (field_name, crop_img), crop_path in zip(reward_items, reward_crop_paths):
+            if not cv2.imwrite(crop_path, crop_img):
+                return None
+            reward_crops_manifest.append({"field": field_name, "path": crop_path})
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "image_path": image_path, "crops": crops_manifest,
+                "reward_crops": reward_crops_manifest,
+            }, f)
+
+        proc = subprocess.run(
+            [sys.executable, str(_COLLAPSE_RETRY_WORKER), manifest_path, output_path],
+            cwd=str(Path(__file__).resolve().parent),
+            capture_output=True,
+            timeout=COLLAPSE_RETRY_TIMEOUT_S,
+        )
+        if proc.returncode != 0:
+            return None
+        with open(output_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        qwen_result = payload.get("qwen_result")
+        raw_text = payload.get("raw_text")
+        if not isinstance(qwen_result, dict) or _is_extraction_collapsed(qwen_result):
+            return None
+        return qwen_result, raw_text
+    except Exception:
+        return None
+    finally:
+        for p in [image_path, manifest_path, output_path] + crop_paths + reward_crop_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
+
+
 def _signature_state(sig, threshold=SIGNATURE_CONFIDENCE_UNCERTAIN_THRESHOLD):
     """present/absent/uncertain from a DIRECT_SEMANTIC signature field's
     {value, confidence}. A low self-rated confidence -- regardless of which
@@ -734,12 +1082,14 @@ def _adapt_qwen_to_common(qwen_result):
     rekening = qwen_result.get("nomor_rekening") or {}
     unit = qwen_result.get("unit_kerja") or {}
     nominal = qwen_result.get("nominal_penempatan") or {}
+    nominal_terbilang = qwen_result.get("nominal_penempatan_terbilang") or {}
     tenor = qwen_result.get("tenor_penempatan") or {}
     tanggal_mulai = qwen_result.get("tanggal_mulai") or {}
     tanggal_selesai = qwen_result.get("tanggal_selesai") or {}
     reward = qwen_result.get("bentuk_reward") or {}
     reward_detail = qwen_result.get("reward_non_tunai_detail") or {}
     reward_tunai_detail = qwen_result.get("reward_tunai_detail") or {}
+    reward_tunai_terbilang = qwen_result.get("reward_tunai_terbilang") or {}
     sig_nasabah = qwen_result.get("signature_nasabah") or {}
     sig_bri = qwen_result.get("signature_bri") or {}
 
@@ -766,12 +1116,14 @@ def _adapt_qwen_to_common(qwen_result):
         "nomor_rekening": wrap(rekening_value, rekening.get("status")),
         "unit_kerja_pengelola_rekening": wrap(unit.get("value"), unit.get("status")),
         "nominal_penempatan": wrap(nominal.get("value"), nominal.get("status")),
+        "nominal_penempatan_terbilang": wrap(nominal_terbilang.get("value"), nominal_terbilang.get("status")),
         "tenor_penempatan": wrap(tenor_value, tenor.get("status")),
         "tanggal_mulai": wrap(tanggal_mulai.get("value"), tanggal_mulai.get("status")),
         "tanggal_selesai": wrap(tanggal_selesai.get("value"), tanggal_selesai.get("status")),
         "bentuk_reward": wrap(reward_value, reward.get("status")),
         "reward_non_tunai_detail": wrap(reward_detail.get("value")),
         "reward_tunai_detail": wrap(reward_tunai_detail.get("value")),
+        "reward_tunai_terbilang": wrap(reward_tunai_terbilang.get("value")),
         "signature_nasabah": _signature_state(sig_nasabah),
         "signature_atasan": _signature_state(sig_bri),
     }
@@ -1042,15 +1394,72 @@ def run_qwen3_vl_local_yolos(document_path, progress_callback=None, cancel_event
     _check_cancel(cancel_event, "prepare")
     image_bgr = _qwen_prepare_image(document_path)
 
+    # V21 -- best-effort close-up crops of the 3 historically weakest fields
+    # (see WEAK_FIELD_CROP_TARGETS/_get_weak_field_crops), sent as EXTRA
+    # images in the SAME single Qwen call -- never a second inference call,
+    # never touching the main full-page image above. Empty on any alignment
+    # failure, which just means today's plain 2-image behavior.
+    #
+    # Choice-field crop (user request: improve tenor_penempatan/bentuk_
+    # reward coret/circle-mark reading) -- TRIED via a close-up crop of the
+    # choice line, added to extra_crops same as the 3 fields above. TESTED
+    # on 8 real documents (crop vs no-crop) and REVERTED (code removed, see
+    # handover.md for the full before/after data and exact removed diff):
+    # bentuk_reward was unaffected (8/8 identical), but tenor_penempatan
+    # REGRESSED on 1/8 -- a document where the crop was verified crystal-
+    # clear and correctly cropped (GT=6, "1/3" struck through, "6" clearly
+    # circled) still got misread as "3" WITH the crop, despite reading
+    # correctly WITHOUT it. Unlike the reward-detail fix, this isn't purely
+    # a resolution problem -- the model can misread even a good crop here,
+    # and the redundant image sometimes actively conflicts with an already-
+    # correct full-page reading instead of only ever helping. Per this
+    # project's own "don't ship a change that doesn't measure well"
+    # discipline, not reattempted without new evidence -- don't repeat this
+    # without a bigger sample and a concrete hypothesis for the regression.
+    #
+    # Reward fix (real user report: reward_tunai/reward_non_tunai still not
+    # extracted even after vlm.REWARD_TUNAI_DETAIL_PROMPT was rewritten to
+    # target the right template line -- root cause: that follow-up call
+    # only ever saw the full page at MAX_SIDE_FULL, same class of problem
+    # already fixed for the 3 fields above via a close-up crop). Computed
+    # from the SAME _get_weak_field_crops call, sent only to the separate,
+    # conditional reward-detail follow-up call (vlm.py), never to this main
+    # call -- does not touch extra_crops/WEAK_FIELD_CROP_TARGETS above.
+    weak_crops, choice_ink_diff = _get_weak_field_crops(document_path)
+    extra_crops = [(name, weak_crops[name]) for name in WEAK_FIELD_CROP_TARGETS if name in weak_crops]
+    reward_crops = {name: weak_crops[name] for name in REWARD_DETAIL_CROP_TARGETS if name in weak_crops}
+    _check_cancel(cancel_event, "prepare")
+
     extract_label = f"Extracting with {ENGINE_LABELS.get('qwen3_vl_local_yolos')}"
     _progress(progress_callback, "extract", 35, extract_label)
     try:
         with _ProgressHeartbeat(progress_callback, "extract", 35, extract_label):
-            qwen_result, raw_text = vlm.extract_direct_semantic_local(image_bgr)
+            qwen_result, raw_text = vlm.extract_direct_semantic_local(
+                image_bgr, extra_crops=extra_crops, reward_crops=reward_crops,
+            )
     except Exception as exc:
         raise ExtractorError(f"Local Qwen3-VL inference failed ({type(exc).__name__}): {exc}",
                               stage=_classify_api_exception(exc)) from exc
     _check_cancel(cancel_event, "extract")
+
+    # V21 -- "extraction collapsed" mitigation (handover.md V20 SS9g): a
+    # collapse is deterministic WITHIN this process, so retrying in-process
+    # would just reproduce it. Retry ONCE in a brand-new subprocess instead
+    # (see collapse_retry_worker.py) -- the only channel that has a real
+    # chance at a different CUDA/bitsandbytes kernel-selection outcome.
+    # Never raises/blocks: any subprocess failure, timeout, or a retry that
+    # collapses again just falls through to the original (collapsed) result.
+    collapse_retry_status = None
+    if _is_extraction_collapsed(qwen_result):
+        collapse_retry_status = "attempted"
+        _progress(progress_callback, "extract", 45, f"{extract_label} (retrying collapsed extraction)")
+        retried = _retry_collapsed_in_subprocess(image_bgr, extra_crops=extra_crops, reward_crops=reward_crops)
+        _check_cancel(cancel_event, "extract")
+        if retried is not None:
+            qwen_result, raw_text = retried
+            collapse_retry_status = "recovered"
+        else:
+            collapse_retry_status = "failed"
 
     _progress(progress_callback, "detect_signatures", 60, "Detecting signatures (local YOLOS)")
     try:
@@ -1081,6 +1490,8 @@ def run_qwen3_vl_local_yolos(document_path, progress_callback=None, cancel_event
     result["ocr_meta"]["qwen_confidence"] = _qwen_self_assessment(qwen_result)
     result["ocr_meta"]["qwen_raw_response"] = raw_text
     result["ocr_meta"]["extraction_collapsed"] = _is_extraction_collapsed(qwen_result)
+    result["ocr_meta"]["collapse_retry"] = collapse_retry_status
+    result["ocr_meta"]["weak_field_crops_used"] = [name for name, _crop in extra_crops]
     result["ocr_meta"]["signature_detector_signatures"] = {
         "signature_nasabah": signature_roles["signature_nasabah"]["diagnostic"],
         "signature_atasan": signature_roles["signature_atasan"]["diagnostic"],
@@ -1088,8 +1499,39 @@ def run_qwen3_vl_local_yolos(document_path, progress_callback=None, cancel_event
     # Qwen's own (superseded) signature judgment kept purely for
     # diagnostics/comparison -- NEVER used as the final signature result.
     result["ocr_meta"]["qwen_raw_signature_diagnostic"] = qwen_raw_signature_diagnostic
+    # Choice-field ink-diff cross-check (user request, staged rollout --
+    # see handover.md): DIAGNOSTIC ONLY for now, does NOT override
+    # tenor_penempatan/bentuk_reward yet. Logs whether the frozen-V18 pixel
+    # ink-diff mechanism (process_choices, never OCR) agrees with Qwen's own
+    # reading, on real documents, BEFORE deciding whether to promote it to
+    # authoritative (same "measure before trusting" discipline that caught
+    # the choice-crop regression above -- don't repeat that mistake here).
+    result["ocr_meta"]["choice_ink_diff_diagnostic"] = _choice_ink_diff_diagnostic(choice_ink_diff, common)
     _progress(progress_callback, "done", 100, "Complete")
     return result
+
+
+def _choice_ink_diff_diagnostic(choice_ink_diff, common):
+    """Compares postprocessing.process_choices' pixel ink-diff verdict
+    against Qwen's own tenor_penempatan/bentuk_reward reading (`common`,
+    POST-adapter so types already match: both int 1/3/6 for tenor, both
+    "tunai"/"non_tunai" strings for reward -- no extra canonicalization
+    needed). DIAGNOSTIC ONLY -- returns a dict for ocr_meta, never mutates
+    `common` or influences the final result. None-safe: `choice_ink_diff`
+    is None whenever alignment failed (see _get_weak_field_crops)."""
+    if choice_ink_diff is None:
+        return {"available": False, "reason": "alignment_failed"}
+    diag = {"available": True}
+    for field_name in ("tenor_penempatan", "bentuk_reward"):
+        ink = choice_ink_diff.get(field_name, {})
+        ink_value, ink_status = ink.get("value"), ink.get("status")
+        qwen_value = (common.get(field_name) or {}).get("value")
+        diag[field_name] = {
+            "ink_diff_value": ink_value, "ink_diff_status": ink_status,
+            "qwen_value": qwen_value,
+            "agree": (ink_value == qwen_value) if ink_value is not None and qwen_value is not None else None,
+        }
+    return diag
 
 
 # ============================================================================

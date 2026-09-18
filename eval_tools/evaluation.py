@@ -47,20 +47,21 @@ import time
 import traceback
 from pathlib import Path
 
+# Dijalankan langsung (`python eval_tools/evaluation.py ...`), jadi sys.path[0]
+# = folder eval_tools/ ini sendiri -- root harus ditambah manual sebelum bisa
+# import package core/pipeline/extractors.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import cv2
 
-import data_input
-import extractors
-import pipeline
-import preprocessing as prep
-import comparison
+from core import data_input
+import extractors.extractors as extractors
+import pipeline.pipeline as pipeline
+from pipeline import preprocessing as prep
+from pipeline import comparison
+from core.paths import PROJECT_ROOT, EVAL_RUNS_DIR
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_DEBUG_DIR = BASE_DIR / "evaluation_debug"
-# V18 -- semua output evaluasi (results csv + summary json) dikumpulkan di
-# SATU folder (sebelumnya berserakan di root project, sulit ditemukan di
-# antara file kode) -- lihat handover.md §12.
-EVAL_RUNS_DIR = BASE_DIR / "eval_runs"
+DEFAULT_DEBUG_DIR = PROJECT_ROOT / "evaluation_debug"
 
 # 5 field keputusan (sesuai handover.md) -> kolom ground truth di spreadsheet
 # evaluasi (SPREADSHEET_COLUMNS milik data_input.py).
@@ -413,6 +414,31 @@ def evaluate_record(record, template_img, template_path, debug_dir, debug_failed
         result["reward_tunai_filled"] = reward_ev.get("tunai_filled")
         result["reward_internal_consistent"] = checks.get("bentuk_reward") != "TOLAK"
 
+        # V21 -- diagnostic-only digits-vs-terbilang cross-check (NOT part of
+        # `checks`/`decision` above -- see comparison.validate_nominal_
+        # terbilang's docstring for why it isn't decisive yet). Measured the
+        # SAME "both evidence read + do they agree" way as tenor/reward above.
+        nominal_terbilang_verdict, nominal_terbilang_reason, nominal_terbilang_evidence = (
+            comparison.validate_nominal_terbilang(raw_results)
+        )
+        result["nominal_terbilang_verdict"] = nominal_terbilang_verdict
+        result["nominal_terbilang_evidence"] = nominal_terbilang_evidence
+
+        # Same check, reused for reward_tunai's own digit/terbilang pair
+        # (vlm.REWARD_TUNAI_DETAIL_PROMPT's reward_tunai_detail/reward_
+        # tunai_terbilang) -- added alongside the crop-based fix for that
+        # follow-up call, so this run's numbers show whether it's actually
+        # helping (reward_tunai has no ground-truth column, so this
+        # self-consistency signal is the only measurable one available).
+        # Diagnostic only, same as the nominal one above -- not decisive.
+        reward_terbilang_verdict, reward_terbilang_reason, reward_terbilang_evidence = (
+            comparison.validate_nominal_terbilang(
+                raw_results, digit_field="reward_tunai_detail", terbilang_field="reward_tunai_terbilang",
+            )
+        )
+        result["reward_terbilang_verdict"] = reward_terbilang_verdict
+        result["reward_terbilang_evidence"] = reward_terbilang_evidence
+
         result["signature_nasabah_status"] = (raw_results.get("signature_nasabah") or {}).get("status", "N/A")
         result["signature_atasan_status"] = (raw_results.get("signature_atasan") or {}).get("status", "N/A")
 
@@ -492,6 +518,22 @@ def build_summary(results):
         lambda r: r.get("reward_choice") != "N/A" and (r.get("reward_non_tunai_filled") or r.get("reward_tunai_filled")))
     reward_consistent = _count(lambda r: r.get("reward_internal_consistent") is True)
 
+    # V21 -- same "both evidence read & agree" measurement, for the new
+    # diagnostic-only digits-vs-terbilang check (comparison.
+    # validate_nominal_terbilang, NOT wired into `decision` -- see its
+    # docstring). "both evidence read" = verdict isn't evidence_missing.
+    nominal_terbilang_both_evidence = _count(lambda r: r.get("nominal_terbilang_verdict") == "consistent"
+                                              or r.get("nominal_terbilang_verdict") == "inconsistent")
+    nominal_terbilang_consistent = _count(lambda r: r.get("nominal_terbilang_verdict") == "consistent")
+
+    # Same measurement, for reward_tunai's digit/terbilang pair (see the
+    # per-record wiring above) -- reward_tunai has no ground-truth column,
+    # so this is the only measurable signal for whether the crop-based
+    # reward-detail fix is actually working.
+    reward_terbilang_both_evidence = _count(lambda r: r.get("reward_terbilang_verdict") == "consistent"
+                                             or r.get("reward_terbilang_verdict") == "inconsistent")
+    reward_terbilang_consistent = _count(lambda r: r.get("reward_terbilang_verdict") == "consistent")
+
     signature_dist = {}
     for col in ("signature_nasabah_status", "signature_atasan_status"):
         signature_dist[col] = {
@@ -531,6 +573,16 @@ def build_summary(results):
         "tenor_internal_consistency_rate": round(tenor_consistent / pipeline_ok, 4) if pipeline_ok else "N/A",
         "reward_both_evidence_read_count": reward_both_evidence,
         "reward_internal_consistency_rate": round(reward_consistent / pipeline_ok, 4) if pipeline_ok else "N/A",
+        "nominal_terbilang_both_evidence_read_count": nominal_terbilang_both_evidence,
+        "nominal_terbilang_internal_consistency_rate": (
+            round(nominal_terbilang_consistent / nominal_terbilang_both_evidence, 4)
+            if nominal_terbilang_both_evidence else "N/A"
+        ),
+        "reward_terbilang_both_evidence_read_count": reward_terbilang_both_evidence,
+        "reward_terbilang_internal_consistency_rate": (
+            round(reward_terbilang_consistent / reward_terbilang_both_evidence, 4)
+            if reward_terbilang_both_evidence else "N/A"
+        ),
         "signature_status_distribution": signature_dist,
         "decision_ground_truth_available": gt_available,
         "decision_accuracy": round(decision_correct / gt_available, 4) if gt_available else "N/A",

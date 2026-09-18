@@ -46,9 +46,9 @@ Alur baru:
 import re
 
 import cv2
-import ocr
-import preprocessing as prep
-from preprocessing import FIELD_CONFIG, CHOICE_GROUPS
+from pipeline import ocr
+from pipeline import preprocessing as prep
+from pipeline.preprocessing import FIELD_CONFIG, CHOICE_GROUPS
 
 # V16 -- bentuk alnum token cetak baris PILIHAN choice (mis. "1/3/6" utk
 # tenor, "tunainontunai" utk bentuk reward), DITURUNKAN LANGSUNG dari

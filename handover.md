@@ -1,6 +1,6 @@
 # HANDOVER — OCR Pipeline Preprocessing & Evaluation
 
-**Last update:** 16 September 2026 (V20 -- HYBRID engine baru "qwen3_vl_local_yolos" [Qwen3-VL Local + YOLOS signature detector, hard local-only gate, additive thd qwen3_vl_local yg TIDAK diubah], vendor asli Tech4Humans YOLOv8 dibatalkan krn repo HF gated [tidak ada akses scriptable], diganti `mdefrance/yolos-tiny-signature-detection` [non-gated, Apache-2.0, NOL dependency pip baru] atas pilihan eksplisit user, kode selesai DAN diuji end-to-end NYATA tanpa mocking [Qwen asli + YOLOS asli, termasuk sesi live server sungguhan], lihat §9i; V20 -- Live Evaluation feature di Record Table (tombol "Evaluasi", modal metrik agregat dari hasil TERSIMPAN saja, tidak pernah OCR ulang), terverifikasi end-to-end nyata (server sungguhan, upload+proses+rerun asli), lihat §9h; V20 -- root-cause investigasi "Extraction Collapsed" pd local Qwen3-VL-4B: CONFIRMED non-determinism run-to-run di level inference runtime (BUKAN dokumen/prompt/schema) -- dokumen yg sama collapse 100% di satu peluncuran proses & berhasil 100% di peluncuran lain, direplikasi 3x independen, lihat §9g; V19f -- V18 DIBEKUKAN sampai user minta lagi, Qwen3-VL 4B disamakan antara local & hosted, signature majority-vote ON by default utk local juga, kanonikalisasi tenor/reward, lihat §9f; V19e -- local Qwen3-VL-2B pada GPU 2GB TERBUKTI tidak usable, engine "qwen3_vl_local" ditambahkan sbg opsi terpisah, lihat §9e; V19c -- ganti engine "qwen2_vl" lokal jadi "qwen3_vl" Hugging Face HOSTED, lihat §9c; V19 -- Qwen2-VL direct-semantic pipeline + Gemini token/cost tracking, lihat §9b)
+**Last update:** 17 September 2026 (V22 addendum -- fix bug mirrored-placeholder `reward_tunai`/`reward_non_tunai` [literal string "tunai"/"non_tunai" muncul sbg nilai palsu kalau detail extraction gagal, SEKARANG null jujur utk Qwen; Gemini/Mistral placeholder TETAP dipertahankan by design] + perkuat instruksi null-default utk SEMUA choice field [tenor_penempatan/bentuk_reward] di prompt, lihat §9l. V22 -- decision-accuracy metric baru di popup "Evaluasi" [OK vs TOLAK, prefix-based, Review dilipat ke Tolak], 3 perbaikan nomor_rekening [prompt/crop-padding/length-gate: 0.56->0.60], + validasi digit-vs-terbilang BARU utk nominal_penempatan/reward_tunai [modul parser Indonesia BARU `terbilang.py`, diagnostic-only, consistency rate nyata 0.9412] -- lihat §9k utk detail lengkap & catatan jujur soal noise run-to-run. V21 -- runtime+accuracy quick-wins pd "qwen3_vl_local_yolos": YOLOS dipindah ke GPU [sebelumnya diam-diam CPU-only], attn_implementation="sdpa" dipin eksplisit, mitigasi "Extraction Collapsed" via retry SATU KALI di subprocess BARU [collapse deterministic per-proses, jadi retry in-process percuma], + close-up crop ROI statis utk 3 field terlemah [nama_nasabah/nomor_rekening/nominal_penempatan]. Full 25-dokumen PERTAMA KALI utk engine ini: nama_nasabah 0.60, nomor_rekening 0.56, nominal_penempatan 0.84, avg 30.83s/dok. Ditemukan JUGA bug lingkungan terpisah: PaddleOCR gagal import (circular import) independen dari perubahan sesi ini -- lihat §9j utk detail lengkap. V20 -- HYBRID engine baru "qwen3_vl_local_yolos" [Qwen3-VL Local + YOLOS signature detector, hard local-only gate, additive thd qwen3_vl_local yg TIDAK diubah], vendor asli Tech4Humans YOLOv8 dibatalkan krn repo HF gated [tidak ada akses scriptable], diganti `mdefrance/yolos-tiny-signature-detection` [non-gated, Apache-2.0, NOL dependency pip baru] atas pilihan eksplisit user, kode selesai DAN diuji end-to-end NYATA tanpa mocking [Qwen asli + YOLOS asli, termasuk sesi live server sungguhan], lihat §9i; V20 -- Live Evaluation feature di Record Table (tombol "Evaluasi", modal metrik agregat dari hasil TERSIMPAN saja, tidak pernah OCR ulang), terverifikasi end-to-end nyata (server sungguhan, upload+proses+rerun asli), lihat §9h; V20 -- root-cause investigasi "Extraction Collapsed" pd local Qwen3-VL-4B: CONFIRMED non-determinism run-to-run di level inference runtime (BUKAN dokumen/prompt/schema) -- dokumen yg sama collapse 100% di satu peluncuran proses & berhasil 100% di peluncuran lain, direplikasi 3x independen, lihat §9g; V19f -- V18 DIBEKUKAN sampai user minta lagi, Qwen3-VL 4B disamakan antara local & hosted, signature majority-vote ON by default utk local juga, kanonikalisasi tenor/reward, lihat §9f; V19e -- local Qwen3-VL-2B pada GPU 2GB TERBUKTI tidak usable, engine "qwen3_vl_local" ditambahkan sbg opsi terpisah, lihat §9e; V19c -- ganti engine "qwen2_vl" lokal jadi "qwen3_vl" Hugging Face HOSTED, lihat §9c; V19 -- Qwen2-VL direct-semantic pipeline + Gemini token/cost tracking, lihat §9b)
 **Baca urutan:** 1 (deskripsi) → 2 (state) → 3 (next steps) → sisanya kalau perlu detail.
 **Prinsip kerja:** MEASURE → FIND ROOT CAUSE → FIX → RE-EVALUATE. **Satu perubahan
 kecil, satu pengukuran full 25-dokumen, baru lanjut** — V14 sengaja hanya 1 fix
@@ -2016,6 +2016,95 @@ Kode engine ini TIDAK PERNAH mengimpor/memanggil apa pun yg menyentuh HF hosted 
 - Skenario "area kosong -> BUKAN false present" dan "kasus ambigu -> uncertain" thd dokumen tanpa tanda tangan sungguhan belum diuji nyata sesi ini -- baru dokumen DENGAN tanda tangan jelas yg diuji end-to-end.
 - Bulk/Index-Range run & rerun utk engine baru ini pakai jalur `_process_batch`/`_process_one_record` yg SAMA persis dgn engine lain (tidak ada percabangan khusus di `app.py`) -- secara desain otomatis berfungsi, TAPI belum di-klik-coba scr manual lewat UI (Chrome tool ditolak user sesi lalu, sama spt fitur Live Evaluation sebelumnya) atau lewat batch >1 dokumen via API.
 
+## 9j. V21 — Runtime + Accuracy Quick-Wins pd "qwen3_vl_local_yolos" (SELESAI, terverifikasi full 25 dokumen)
+
+Dipicu permintaan user: "extractor yg combine qwen dgn signature detection sudah bagus di runtime, ada ide utk tingkatkan runtime atau bikin qwen baca lebih presisi?". 4 perubahan quick-win (low-risk, additive, HANYA menyentuh `qwen3_vl_local_yolos` kecuali disebutkan lain), disepakati via plan mode sebelum implementasi:
+
+**1 — YOLOS ke GPU (`signature_detector.py`).** Root cause: modul ini TIDAK PERNAH memanggil `.to(device)` sama sekali sejak V20 -- YOLOS selalu jalan di CPU walau Qwen jalan di CUDA dlm proses yg SAMA (beda dgn `vlm.py` yg sudah punya pola `_choose_device`). Fix: `SIGNATURE_DETECTOR_DEVICE` env var (pola SAMA persis dgn `VLM_DEVICE`), model+input dipindah ke CUDA kalau tersedia. Diverifikasi nyata: `_device == "cuda"`, inference warm ~26ms/panggilan (vs beberapa detik cold-start CPU), override `SIGNATURE_DETECTOR_DEVICE=cpu` tetap berfungsi sbg fallback.
+
+**2 — Attention backend dipin eksplisit (`vlm.py` `_load()`).** Diverifikasi LANGSUNG thd model yg sudah termuat: `model.config._attn_implementation == "sdpa"` SUDAH jadi default transformers di stack ini (torch 2.14.0+cu126, transformers 5.16.1) -- TIDAK ada regresi/perubahan perilaku, cuma dipin eksplisit (`attn_implementation="sdpa"`, dgn fallback `TypeError` kalau versi lebih lama tidak kenal argumen ini) supaya upgrade library nanti tidak diam-diam mengganti default. `flash_attention_2` SENGAJA TIDAK dipakai: tidak terpasang (`No module named 'flash_attn'`), rapuh dibuild di Windows, dan sesuai kesepakatan risk-conservative dgn user.
+
+**3 — Mitigasi "Extraction Collapsed" via subprocess retry (`extractors.py` + `collapse_retry_worker.py` BARU).** §9g menemukan collapse itu deterministic DI DALAM satu proses tapi bervariasi ANTAR peluncuran proses -- artinya retry in-process PASTI mengulang hasil collapse yg sama (greedy decoding, `do_sample=False`). Fix: `_retry_collapsed_in_subprocess()` menulis image+crops+manifest JSON ke temp dir, spawn `sys.executable collapse_retry_worker.py <manifest> <output>` (proses Python BENAR-BENAR baru -> model dimuat ulang dari nol, kemungkinan real dpt kernel-selection CUDA/bitsandbytes yg beda), timeout `COLLAPSE_RETRY_TIMEOUT_S` (default 240s, generous krn nanggung load model ulang ~15-19s + 1x inference). Hasil retry: kalau BUKAN collapse lagi -> dipakai sbg qwen_result final (`ocr_meta.collapse_retry = "recovered"`); kalau gagal/timeout/collapse lagi -> fallback ke hasil asli TANPA crash (`ocr_meta.collapse_retry = "failed"`). Diverifikasi dgn SIMULASI (monkeypatch `vlm.extract_direct_semantic_local` utk memaksa collapse palsu di panggilan pertama): jalur recovered terbukti bekerja (nilai field kembali benar), jalur failed jg terbukti graceful (status tetap `not_detected`, tidak crash, tidak ada temp file bocor).
+
+**4 — Close-up crop utk 3 field terlemah (`vlm.py` + `extractors.py`).** Target: `nama_nasabah`/`nomor_rekening`/`nominal_penempatan` (V16 full-eval: 38.9%/57.9%/47.6%, jauh di bawah `bentuk_reward` 100%). Desain: `extractors._get_weak_field_crops()` menjalankan `prep.prepare_and_align()` (warp perspektif ke template) LALU crop `prep.FIELD_CONFIG[field]["value_bbox"]` statis dgn padding `WEAK_FIELD_CROP_PAD_RATIO=0.5` -- crop ini dikirim sbg image TAMBAHAN (bukan panggilan kedua) dlm SATU panggilan Qwen yg sama (`vlm.extract_direct_semantic_local(image_bgr, extra_crops=[...])`), prompt `DIRECT_SEMANTIC_PROMPT` diperluas dinamis via `_build_direct_semantic_prompt()` HANYA kalau ada crop (byte-identical utk semua engine lain, diverifikasi via assert). Gambar utama (full-page, coarse-rotation-only) TIDAK disentuh sama sekali.
+
+**Ditemukan & dibuang sebelum versi final (jangan diulang):**
+- Rencana awal memakai `dynamic.extract_dynamic_fields()` (localisasi ber-OCR V14-V17 yg lebih presisi) utk bbox crop -- DIBUANG krn `PaddleOCR` TERBUKTI gagal diimpor di environment ini (`import ocr; ocr.get_ocr_engine()` SENDIRIAN, tanpa vlm/torch apa pun, melempar `AttributeError: partially initialized module 'paddle' has no attribute 'tensor' (circular import)`). Ini bug LINGKUNGAN yg sudah ADA SEBELUM sesi ini (mempengaruhi jg engine V18 & evaluation.py/stage_evaluation.py kapan pun mereka lewat jalur OCR ini), BUKAN sesuatu yg dirusak sesi ini -- di luar scope diperbaiki (risk-conservative). Diganti box statis `FIELD_CONFIG` saja (tanpa OCR).
+- Padding 0.5 + hard-clamp ke batas tetangga (`prep._clamp_field_box_y`, pola SAMA dgn V14/V17) DICOBA lalu DIBUANG: diverifikasi VISUAL bahwa 3 baris identity_area (`nama_nasabah`/`nomor_rekening`/`unit_kerja`) punya GAP NOL persis di `value_bbox` template (dikonfirmasi numerik: batas bawah nama_nasabah == batas atas nomor_rekening, 311px == 311px pd satu dokumen nyata), dan tulisan tangan asli SERING jatuh DI BAWAH batas administratif itu (temuan row-drift V14/V15 yg sama) -- clamp ke batas tetangga memotong crop jadi LEBIH KECIL drpd box mentah tanpa padding sama sekali, menyembunyikan justru tulisan yg ingin diperjelas. Keputusan akhir: padding TANPA clamp (risiko sebaliknya -- sedikit bocoran baris tetangga -- diterima krn ini cuma citra SUPLEMEN utk VLM yg jg melihat halaman penuh & diberi tahu apa yg harus difokuskan, bukan jendela OCR pixel-diff yg gampang bingung oleh tinta ekstra).
+
+**Hasil full 25-dokumen PERTAMA KALI utk `qwen3_vl_local_yolos`** (`eval_runs/evaluation_summary_v21_optim.json`; dijalankan via wrapper batch 4x proses terpisah krn `evaluation.py` biasa/`--limit` kena OOM-kill BERULANG oleh sistem walau RAM bebas ~8.6GB saat dicek manual -- pola SAMA persis dgn §10 poin 7/§12 V17, BUKAN regresi baru; wrapper reuse `evaluate_record()`/`build_summary()`/`write_csv()` apa adanya sesuai pola yg sudah didokumentasikan, TIDAK mengubah `evaluation.py`):
+
+| Field | Akurasi (25 dok, V21) | Referensi historis terdekat |
+|---|---|---|
+| nama_nasabah | **0.60 (15/25)** | V16 (`v18`) 0.3889; `qwen3_vl_local` polos §9g (kena collapse) 0.42 |
+| nomor_rekening | **0.56 (14/25)** | V16 (`v18`) 0.5789; `qwen3_vl_local` polos §9g 0.47 |
+| nominal_penempatan | **0.84 (21/25)** | V16 (`v18`) 0.4762 |
+| tenor_penempatan | 0.76 (19/25) | tidak dapat crop (di luar scope V21) |
+| bentuk_reward | 1.00 (24/24) | tidak dapat crop (di luar scope V21) |
+| pipeline_success_rate | 1.00 (0 gagal/crash) | -- |
+| average_processing_time_sec | **30.83s** | live-server §9i (SEBELUM V21) 47.016s; §9h `qwen3_vl_local` biasa 74-97s |
+
+**Catatan jujur**: ini BUKAN perbandingan before/after terkontrol thd kode identik (4 perubahan diimplementasi sekaligus sebelum eval penuh pertama drpd 1-per-1 spt disiplin biasa sesi ini -- trade-off eksplisit krn tiap eval 25-dokumen makan ~15-20 menit runtime nyata & mesin ini gampang OOM, lihat di atas), jadi kontribusi individual tiap dari 4 perubahan thd angka akurasi TIDAK bisa dipisah scr pasti dari angka ini saja -- yang bisa diklaim dgn percaya diri: (a) tidak ada regresi/crash pd 25 dokumen manapun, (b) waktu proses turun nyata dibanding satu-satunya angka live-server sebelumnya utk engine yg SAMA, (c) 2 dari 3 field target crop (nama_nasabah, nominal_penempatan) naik SUBSTANSIAL dibanding referensi historis manapun yg ada, (d) `nomor_rekening` kira-kira setara/stabil, BUKAN regresi. Referensi historis "V16 (v18)" di atas jg BUKAN apple-to-apple (engine BEDA, `v18`=pipeline OCR+ROI klasik) -- dicantumkan sbg titik pembanding kasar SATU-SATUNYA yg tersedia, bukan baseline formal.
+
+**Temuan terpisah, PENTING, di luar scope V21 -- laporkan ke user, jangan diabaikan:** PaddleOCR rusak di environment ini (lihat poin "Ditemukan & dibuang" di atas) -- traceback lengkap berakhir di `paddlex/utils/import_guard.py``import_paddle_module` -> `paddle/base/layers/math_op_patch.py:962` `AttributeError: partially initialized module 'paddle' has no attribute 'tensor'`. Reproducible via `import ocr; ocr.get_ocr_engine()` SENDIRIAN di proses Python baru, TANPA torch/vlm/extractors apa pun diimpor duluan -- jadi ini BUKAN konflik order-import dgn torch, kemungkinan besar masalah versi paddlex/paddleocr/numpy di venv ini. Ini memblokir jalur OCR apa pun (`ocr.py`/`dynamic_extraction.py`) yg dipakai engine `v18` DAN `stage_evaluation.py`/skrip lain yg lewat situ -- BELUM diinvestigasi/diperbaiki sesi ini (di luar scope "quick win" yg disepakati), next step yg valid utk sesi terpisah.
+
+**File berubah**: `signature_detector.py` (device selection), `vlm.py` (`attn_implementation`, `_build_direct_semantic_prompt`, `extra_crops` param di `_extract_direct_semantic_local_core`/`extract_direct_semantic_local`), `extractors.py` (`_retry_collapsed_in_subprocess`, `_get_weak_field_crops`, `_pad_bbox`, wiring di `run_qwen3_vl_local_yolos`), `collapse_retry_worker.py` (BARU). **TIDAK disentuh**: `qwen3_vl_local`/`qwen3_vl` (majority-vote path lama, prompt tanpa crop byte-identical), V18, Gemini, `app.py`, `static/index.html`, `comparison.py`, `postprocessing.py`.
+
+## 9k. V22 — Decision-Accuracy Metric, Perbaikan nomor_rekening, Validasi Digit-vs-Terbilang (SELESAI, terverifikasi full 25 dokumen)
+
+Dipicu 3 permintaan user sekaligus: (1) popup "Evaluasi" perlu skor akurasi OK/TOLAK keseluruhan (prefix-based: GT mulai dgn "OK"/"Oke" vs prediksi "OK" -> benar; GT mulai dgn "Tolak" vs prediksi "Tolak" -> benar); (2) `nomor_rekening` field terlemah, minta beberapa pendekatan perbaikan + diagnosis apakah ini soal postprocessing; (3) validasi cross-check digit-vs-terbilang (mis. "10.000" harus konsisten dgn "sepuluh ribu") utk field yg punya 2 representasi nilai di form.
+
+**Temuan awal penting (sebelum implementasi, mengoreksi asumsi user):**
+- Popup "Evaluasi" (`live_evaluation.py`) TERNYATA **belum punya metrik decision-accuracy sama sekali** — hanya per-field accuracy + confusion matrix. `evaluation.py` (CLI) SUDAH punya prefix-based GT mapping (`_map_ground_truth_decision`, "ok"->OK/"tolak"->TOLAK) sejak lama — bukan bug yg perlu diperbaiki, tapi metrik yg perlu DITAMBAHKAN ke popup live, reuse logic yg sama.
+- `nomor_rekening` **BUKAN terutama bug postprocessing** — `postprocessing.normalize_numeric` cuma strip non-digit + perbaiki huruf OCR-confusable (O->0 dst), justru membantu. Root cause asli: (a) `DIRECT_SEMANTIC_PROMPT` cuma kasih SATU baris instruksi utk field ini (`"nomor_rekening - account number"`), TIDAK ADA aturan anti-bleed spt `unit_kerja` yg sudah py; (b) field ini MIDDLE dari 3 baris identity_area ber-gap NOL (bocor dari ATAS & BAWAH, beda dgn `nama_nasabah` yg cuma bocor ke bawah); (c) tidak ada anchor visual khas (beda dgn `nominal_penempatan` yg ada "Rp"+kurung); (d) `validate_value()` cuma terima 4-30 digit -- nyaris tanpa filter. Diverifikasi LANGSUNG thd `assets/ocr_evaluation.xlsx`: nomor rekening BRI asli KONSISTEN 14-16 digit.
+- Terbilang **TIDAK berlaku utk nomor_rekening** (nomor rekening tidak punya representasi kata di form) — berlaku utk `nominal_penempatan` & detail nilai `reward_tunai` (keduanya punya format cetak `"Rp………… (…………)"`, diverifikasi langsung thd `assets/template.pdf`). Teks terbilang SEBELUMNYA dibuang (`postprocessing.normalize_currency`: `text.split("(")[0]`), tidak pernah diparse balik. Pola desain "2 bukti independen harus konsisten" SUDAH ADA di `comparison.validate_tenor()`/`validate_reward()` (utk pasangan field berbeda) — dipakai ulang, bukan pola baru.
+
+**Bagian 1 — Decision-accuracy metric (`live_evaluation.py`, `static/index.html`).** `_decision_accuracy_stats()` (baru) reuse `evaluation._map_ground_truth_decision` verbatim (import langsung, tanpa duplikasi logic) utk GT, baca `result["decision_v9_2"]["decision"]` utk prediksi, lipat ke biner (`"OK"` exact vs SISANYA jadi `"TOLAK"` — **Review dihitung SAMA spt Tolak per keputusan eksplisit user**, krn keduanya bukan auto-approval; GT di dataset asli TIDAK PERNAH mengandung "Review" jadi pelipatan ini cuma menyentuh sisi prediksi). Record tanpa GT ATAU tanpa keputusan (pipeline gagal) dikecualikan dari numerator MAUPUN denominator (prinsip "jangan hitung data hilang sbg salah" yg sudah dipakai di seluruh file ini). Output: `accuracy`, `false_accept_rate`/`false_reject_rate` (+count), `review_folded_into_tolak_count` (transparansi). Diverifikasi UNIT TEST manual (5 record buatan, semua kombinasi OK/TOLAK/REVIEW/missing) — angka cocok persis hitungan tangan. Frontend: 1 tile baru di summary row + 1 tabel detail (Accuracy/FAR/FRR + catatan Review-folding), reuse `evalFmtPct` yg sudah ada, TIDAK mengubah render branch lain.
+
+**Bagian 2 — Perbaikan nomor_rekening**, scoped ke engine aktif `qwen3_vl_local_yolos` saja (V18 tetap beku):
+- **(a) Prompt** (`vlm.py` `DIRECT_SEMANTIC_PROMPT`): tambah 1 aturan baru persis di antara aturan `nama`/`unit_kerja` yg sudah ada (bukan pola baru) — jelaskan posisi baris (di antara nama & unit_kerja), estimasi panjang nyata (15-16 digit), toleransi format titik, dan larangan bocor ke baris tetangga.
+- **(b) Crop padding per-field** (`extractors.py`): `WEAK_FIELD_CROP_PAD_RATIO` diubah dari 1 rasio flat (0.5) jadi dict per-field `(pad_x, pad_y)` — `nomor_rekening` dapat `(0.5, 0.2)` (vertikal lebih sempit drpd `nama_nasabah`/`nominal_penempatan` yg tetap `(0.5, 0.5)`), krn field ini SATU-SATUNYA yg diapit baris tetangga di KEDUA sisi (dikonfirmasi ulang pixel-exact sesi V21 sebelumnya). Catatan jujur: sempat dicoba TANPA padding sama sekali + hard-clamp ke batas tetangga (`prep._clamp_field_box_y`, pola V14/V17) — DIBUANG, krn diverifikasi visual clamp memotong crop jadi LEBIH KECIL drpd box mentah tanpa padding (tulisan tangan asli sering jatuh DI BAWAH batas administratif baris, temuan row-drift V14/V15 yg sama) — padding tanpa clamp dipertahankan sbg keputusan akhir.
+- **(c) Length sanity gate** (`extractors.py`, BUKAN `postprocessing.py` -- lihat catatan jujur di bawah): `_is_plausible_account_number()` baru, range 13-17 digit (margin dari 14-16 digit nyata), demote ke `not_detected` (BUKAN reject diam-diam) kalau di luar range — filosofi sama dgn V18 Fix 3 (`_identity_type_mismatch`). **Diverifikasi NYATA menangkap 1 kasus sungguhan**: model membaca "430531539" (9 digit, sebagian dari nomor asli) pd satu dokumen — gate benar menolaknya jadi review drpd diam-diam salah.
+- **Catatan jujur PENTING (koreksi rencana awal)**: rencana semula menaruh gate ini di `postprocessing.build_text_field_result()` (titik singgah 4 jalur V18) — SALAH utk engine aktif. Diverifikasi LANGSUNG dgn membaca kode: `extractors.adapt_common_to_pipeline_shape()` (dipakai SEMUA engine non-V18) menaruh nilai Qwen LANGSUNG ke `final_results` via closure `put()`, TIDAK PERNAH lewat `build_text_field_result`/`normalize_numeric`/`validate_value` sama sekali — seluruh pipeline cleaning V18 itu HANYA berlaku utk engine `v18`. Gate dipindah ke `extractors.py` persis di titik `nomor_rekening` diproses di `adapt_common_to_pipeline_shape`, agar benar2 aktif utk engine yg dipakai sekarang.
+
+**Bagian 3 — Validasi digit-vs-terbilang (`terbilang.py` BARU, `vlm.py`, `extractors.py`, `comparison.py`, `evaluation.py`, `live_evaluation.py`).**
+- `terbilang.py` (baru, 0 dependency eksternal): `parse_terbilang(text) -> int|None`, grammar Indonesia standar (satuan/belasan/puluhan/ratusan/ribu/juta/miliar), dukung kontraksi "se-" ("seribu"/"sejuta") DAN 2 ejaan belasan ("limabelas" fused ATAU "lima belas" 2 kata). Diuji STANDALONE dulu (27 kasus unit test, termasuk nilai nyata dari sesi ini spt "empat puluh delapan juta tujuh ratus lima puluh ribu rupiah"->48750000) SEBELUM disambungkan ke apa pun, sesuai rencana verifikasi.
+- `vlm.py`: `DIRECT_SEMANTIC_PROMPT` dapat field baru `nominal_penempatan_terbilang` (transkripsi kata dlm kurung, TERPISAH dari tugas baca digit); `REWARD_TUNAI_DETAIL_PROMPT` dapat field baru `reward_tunai_terbilang` (SEBELUMNYA instruksi promptnya eksplisit MELARANG model melaporkan teks terbilang -- instruksi itu diganti jadi "laporkan sbg field terpisah" utk kasus BARU ini saja; instruksi digit-only utk field aslinya tetap sama). `max_tokens` follow-up reward-tunai dinaikkan 40->80 (2 field skrg, bukan 1).
+- `extractors.py`: 2 field terbilang baru diteruskan lewat `_adapt_qwen_to_common`/`adapt_common_to_pipeline_shape` sbg entry `raw_results` TERPISAH (BUKAN bagian `FIELD_ORDER`/tabel field yg ditampilkan -- diagnostic only, tidak mengubah UI).
+- `comparison.validate_nominal_terbilang()` (baru): pola SAMA persis dgn `validate_tenor`/`validate_reward` ("2 bukti independen harus setuju"), tapi **SENGAJA belum disambungkan ke `_decide_from_checks`/keputusan OK-TOLAK-REVIEW** — verdict pakai vocabulary BEDA (`consistent`/`inconsistent`/`evidence_missing`, bukan OK/TOLAK/REVIEW) supaya tidak pernah tertukar dgn keputusan bisnis sungguhan. Alasan konservatif: cek BARU tanpa validasi skala-nyata dulu — promosi jadi decisive adalah follow-up terpisah stlh akurasinya diukur.
+- `evaluation.py`/`live_evaluation.py`: `nominal_terbilang_both_evidence_read_count`/`nominal_terbilang_internal_consistency_rate`, pola SAMA dgn `tenor_both_evidence_read_count` yg sudah ada.
+- **Diverifikasi NYATA menangkap 1 bug sungguhan** (bukan cuma lolos unit test): pd satu dokumen nyata, model membaca `nominal_penempatan`="5.000.00" (->500rb salah) TAPI `nominal_penempatan_terbilang`="Lima Juta rupiah" (->5.000.000 benar, dikonfirmasi visual crop sesi V21 sblmnya) — `validate_nominal_terbilang` BENAR melaporkan `"inconsistent"` dgn detail digit vs terbilang yg jelas, persis skenario yg diminta user.
+
+**Hasil full 25-dokumen** (`eval_runs/evaluation_summary_v22_optim.json`, dibanding `v21_optim` sesi sebelumnya, wrapper batch 4x proses sama spt V21 krn `evaluation.py` masih OOM-kill di sistem ini):
+
+| Metrik | V21 | V22 |
+|---|---|---|
+| nama_nasabah | 0.60 | 0.56 |
+| **nomor_rekening** | 0.56 | **0.60** |
+| nominal_penempatan | 0.84 | 0.84 |
+| tenor_penempatan | 0.76 | 0.68 |
+| bentuk_reward | 1.00 | 1.00 |
+| decision_accuracy (CLI, 7-check strict) | (tdk diukur sesi V21) | 0.12 |
+| decision-accuracy BARU (OK vs TOLAK biner, Review->Tolak) | -- (belum ada) | **0.16** (4/25 -- FRR 0.9091, sangat tinggi) |
+| nominal_terbilang_internal_consistency_rate | -- (belum ada) | **0.9412** (16/17 evidence lengkap setuju) |
+| avg_processing_time_sec | 30.83 | 34.46 |
+
+**Catatan jujur (WAJIB dibaca sebelum menganggap sesi ini "berhasil/gagal")**: 4 perubahan (a/b/c Bagian 2 + skema Bagian 3) diuji SEKALIGUS dlm satu eval 25-dokumen, BUKAN 1-per-1 sesuai disiplin biasa sesi ini — trade-off eksplisit sama spt V21 (tiap eval 25-dokumen makan ~15-20 menit nyata + mesin ini gampang OOM, lihat §9j). Kontribusi individual TIDAK bisa dipisah pasti dari angka gabungan ini. Yang bisa diklaim percaya diri: (1) tidak ada crash/gagal di 25 dokumen manapun; (2) `nomor_rekening` naik +4 poin (56%->60%), TAPI sampel 25 dokumen + non-determinism model (dikonfirmasi ulang: menambah field ke prompt/schema mengubah SELURUH urutan token generate, jadi bahkan field yg TIDAK disentuh spt `tenor_penempatan` & `nama_nasabah` ikut bergeser -- turun 76%->68% & 60%->56%) berarti ini BUKAN bukti kuat, perlu run ulang/sampel lebih besar utk konfirmasi; (3) metrik decision-accuracy biner BARU **bekerja benar secara teknis** (diverifikasi unit test + data nyata) dan mengungkap temuan JUJUR yg sudah lama terdokumentasi (§10 poin 6): False Reject Rate 90.91% berarti mayoritas dokumen GT-OK tetap di-Tolak/Review oleh sistem — field-level accuracy yg lumayan TIDAK otomatis jadi decision-accuracy yg baik, krn 7-check butuh SEMUA benar sekaligus; ini BUKAN regresi dari sesi ini, cuma metrik baru yg pertama kali mengukurnya scr eksplisit; (4) validasi terbilang TERBUKTI menangkap kesalahan nyata (bukan cuma teori), consistency rate 94% pd kasus yg datanya lengkap adalah sinyal SEHAT bahwa fitur ini tidak berisik/salah-alarm berlebihan, tapi 17/25 "both evidence read" berarti masih ~1/3 dokumen blm dapat 2 bukti sekaligus (evidence_missing) -- belum diinvestigasi lebih lanjut, next step yg valid.
+
+**File berubah**: `terbilang.py` (BARU), `live_evaluation.py` (`_decision_accuracy_stats`, `_nominal_terbilang_stats`, import `evaluation`), `static/index.html` (tile + tabel Decision Accuracy baru), `vlm.py` (prompt `nomor_rekening`+`nominal_penempatan_terbilang`+`reward_tunai_terbilang`, `DIRECT_SEMANTIC_FIELDS`), `extractors.py` (`_is_plausible_account_number`, `WEAK_FIELD_CROP_PAD_RATIO` per-field, `_pad_bbox` 2-ratio, wiring 2 field terbilang baru), `comparison.py` (`validate_nominal_terbilang`, import `terbilang`), `evaluation.py` (`nominal_terbilang_*` metrics). **TIDAK disentuh**: `postprocessing.py`/`preprocessing.py`/`dynamic_extraction.py` (V18 tetap beku), `app.py`, `pipeline.py`, `_decide_from_checks`/keputusan OK-TOLAK-REVIEW produksi (terbilang tetap diagnostic-only).
+
+## 9l. V22 addendum — Fix Mirrored-Placeholder reward_tunai/reward_non_tunai + Perkuat Null-Default Choice Field (SELESAI)
+
+Dipicu laporan user: "sebagian record sudah terekstrak benar, sebagian lain field reward_tunai/reward_non_tunai masih berisi literal string 'tunai'/'non_tunai'". Root cause dikonfirmasi di `extractors.adapt_common_to_pipeline_shape`: kapan pun `bentuk_reward` terbaca (mis. "tunai") TAPI follow-up detail extraction (`reward_tunai_detail`, panggilan Qwen terpisah) gagal/None, kode LAMA fallback ke STRING PILIHAN itu sendiri ("tunai") sbg placeholder — bukan nilai nominal asli, tapi terlihat spt "sudah terisi". Ini jg diam-diam merusak `comparison.validate_reward()`'s evidence check (`tunai_filled = bool(value)` — placeholder non-kosong bikin `tunai_filled=True` walau amount-nya TIDAK PERNAH benar2 terbaca, melewati validasi "2 bukti independen" yg jadi tujuan asal fungsi itu).
+
+**Fix** (`extractors.py`): deteksi `"reward_tunai_detail" in common` utk bedakan engine yg BENAR2 mencoba ekstraksi detail terpisah (Qwen, key SELALU ada krn `_adapt_qwen_to_common` selalu set-nya lewat `wrap()`, walau value-nya None) vs yg TIDAK PUNYA konsep detail terpisah sama sekali (Gemini/Mistral, key TIDAK ADA di schema mereka). Utk Qwen: None tetap None, TIDAK PERNAH overwrite dgn placeholder. Utk Gemini/Mistral: placeholder LAMA dipertahankan (satu2nya cara `validate_reward` py bukti utk engine itu, "known deliberate simplification" yg sudah terdokumentasi sblm sesi ini — SENGAJA tidak diubah). Status field jg diperbaiki ikut: `"detected"` HANYA kalau value-nya benar2 terisi (sblmnya `"detected"` dipasang tiap kali choice cocok, walau value-nya kosong).
+
+Diverifikasi NYATA (bukan cuma unit test sintetis): 1 dokumen dgn detail terbaca ("1000000") -> `reward_tunai` = nilai asli (unchanged, behavior lama sdh benar utk kasus ini); 1 dokumen dgn detail GAGAL terbaca (`bentuk_reward="non_tunai"`, follow-up return None) -> `reward_non_tunai` skrg `None` (SEBELUM fix: literal `"non_tunai"`).
+
+**Perkuat null-default utk SEMUA choice field** (`vlm.py` `DIRECT_SEMANTIC_PROMPT`, `tenor_penempatan` & `bentuk_reward`): ditambah kalimat eksplisit "kalau TIDAK ADA mark sama sekali (bukan cuma ambigu) -> null, JANGAN default ke pilihan manapun" per permintaan user ("this happen for all the choice field we will extract") — sebelumnya prompt sudah bilang "null if unclear" tapi tidak eksplisit membedakan "ambigu/ragu" vs "benar2 tidak ada tanda apa pun", jadi diperjelas keduanya sama2 -> null.
+
+**File berubah**: `extractors.py` (`detail_extraction_attempted` gate), `vlm.py` (prompt, tidak ada perubahan field/schema baru).
+
 ## 10. Prioritas Berikutnya (berdasar data V15.2/V17/V18 di atas, BUKAN tebakan)
 
 **CATATAN V19f (§9f): V18 DIBEKUKAN** -- semua item di bawah ini adalah
@@ -2274,23 +2363,27 @@ menyulitkan cari file evaluasi/diagnostic terbaru. `eval_runs/` di-gitignore
 situ HANYA utk referensi lokal, TIDAK di-commit. Semua file historis (V13-V18)
 SUDAH dipindah ke sana sesi ini, lihat §13.
 
+**(Restructure) Semua perintah di bawah sekarang pakai prefix `eval_tools/`**
+-- file-nya pindah folder, isi/argumen persis sama, lihat catatan restructure
+di akhir file ini.
+
 ```bash
 # end-to-end (field accuracy + decision accuracy) -- paling relevan utk "akurasi asli"
-python evaluation.py --dataset assets/ocr_evaluation.xlsx --label <nama_run> --debug-dir none
+python eval_tools/evaluation.py --dataset assets/ocr_evaluation.xlsx --label <nama_run> --debug-dir none
 
 # 3-gate funnel (PREPROCESSING -> ROI -> OCR), CER, dst -- utk isolasi root cause per stage
-python stage_evaluation.py --dataset assets/ocr_evaluation.xlsx --label <nama_run> --no-xlsx --debug-dir none
+python eval_tools/stage_evaluation.py --dataset assets/ocr_evaluation.xlsx --label <nama_run> --no-xlsx --debug-dir none
 
 # uji cepat sebelum full run (hemat waktu ~12s/dokumen)
-python evaluation.py --dataset assets/ocr_evaluation.xlsx --label smoke --limit 5 --debug-dir none
+python eval_tools/evaluation.py --dataset assets/ocr_evaluation.xlsx --label smoke --limit 5 --debug-dir none
 
 # bandingkan beberapa run (lihat §2, poin 4) -- path SEKARANG di eval_runs/
-python compare_runs.py eval_runs/evaluation_summary_<a>.json eval_runs/evaluation_summary_<b>.json
+python eval_tools/compare_runs.py eval_runs/evaluation_summary_<a>.json eval_runs/evaluation_summary_<b>.json
 
 # audit diagnostik signature_nasabah/signature_atasan (V16, §6) -- CSV per
 # record: ink_area_ratio/spread_x/spread_y/component_count/change_ratio/status
 # -- ditulis ke eval_runs/signature_diagnostics.csv
-python signature_diagnostics.py --dataset assets/ocr_evaluation.xlsx
+python eval_tools/signature_diagnostics.py --dataset assets/ocr_evaluation.xlsx
 ```
 
 **Ingat**: `evaluation.py` TANPA `--debug-dir none` MENULIS folder
@@ -2316,28 +2409,36 @@ mengulang retry penuh berkali-kali.
 
 ## 13. Peta File
 
-**Aktif (produksi, di-import `app.py`/`pipeline.py`):** `preprocessing.py`, `ocr.py`,
-`postprocessing.py`, `dynamic_extraction.py`, `comparison.py`, `vlm.py`, `pipeline.py`,
-`data_input.py`, `app.py`, `static/index.html`.
+**(Restructure) File pindah folder, lihat catatan restructure di akhir file
+ini utk detail lengkap. Peta di bawah ini SUDAH folder baru — kalau baca
+referensi file:line di bagian atas handover ini (§1-§12, semua ditulis
+SEBELUM restructure), nomor barisnya sudah tidak match lagi, cari fungsinya
+pakai grep nama fungsi, bukan percaya nomor baris.**
 
-**Evaluasi (standalone CLI, tidak di-import app.py):** `evaluation.py`,
-`stage_evaluation.py`, `compare_runs.py` (V13), `signature_diagnostics.py` (V16).
-Output KEEMPAT tool ini (csv/json hasil run) ditulis ke folder **`eval_runs/`**
-(V18 — dibuat otomatis, di-gitignore, SATU tempat utk semua evaluasi/diagnostic
-drpd berserakan di root spt sebelumnya), isinya: `evaluation_results_*.csv`/
-`evaluation_summary_*.json` (V15-V18, riwayat lengkap), `stage_evaluation_
-results_*`/`stage_evaluation_summary_*` (kalau `stage_evaluation.py` dijalankan),
-`compare_runs_*` (`compare_runs.py`), `signature_diagnostics.csv` (V16-V18),
-plus 3 file diagnostic pengukuran threshold V17 (`identity_roi_baseline.csv`,
-`raw_coverage_baseline.csv`, `nasabah_masked_coverage.csv` — bukti dasar
-`FIELD_BOX_COLLAPSE_RATIO`/`SIGNATURE_RAW_COVERAGE_BLOWOUT_RATIO`/
-`SIGNATURE_STATIC_MASK_THRESHOLD`, lihat §7).
+- `core/` — `config.py`, `data_input.py`, `terbilang.py`, `paths.py` (baru,
+  satu sumber utk semua path folder project).
+- `pipeline/` — `preprocessing.py`, `ocr.py`, `postprocessing.py`,
+  `dynamic_extraction.py`, `comparison.py`, `vlm.py`, `pipeline.py`.
+- `extractors/` — `extractors.py`, `signature_detector.py`,
+  `collapse_retry_worker.py`.
+- `eval_tools/` — `evaluation.py`, `stage_evaluation.py`, `compare_runs.py`,
+  `signature_diagnostics.py`, `live_evaluation.py`, `diagnose_collapse.py`,
+  `local_qwen_eval.py`. Semua standalone CLI KECUALI `live_evaluation.py`
+  (di-import `app.py` langsung, dipakai fitur popup "Evaluasi" di UI).
+- Tetap di root: `app.py` (entrypoint, `python app.py` tidak berubah),
+  `static/` (frontend, tidak disentuh), `prd.md`, `handover.md`.
+- Data/model (tidak disentuh): `assets/`, `downloaded_documents/`, `models/`,
+  `outputs/`, `uploads/`, `eval_runs/`.
 
-**Eksperimen/versi lama, TIDAK di-import mana pun secara aktif (verifikasi ke user
-sebelum dihapus — mungkin masih dipakai manual utk banding V10/11 vs V12 lewat
-`--pipeline pipeline1`):** `pipeline1.py`/`pipeline2.py`, `comparison1.py`/`comparison2.py`,
-`postprocessing1.py`, `vlm1.py`, `index1.html`, `static/index1.html`,
-`static/serep2.html`/`serep3.html`/`serep4.html`/`serep6.html`.
+Output evaluasi (csv/json hasil run) tetap di folder **`eval_runs/`** seperti
+sebelumnya (V18, dibuat otomatis, di-gitignore) — restructure ini tidak
+mengubah ke mana output ditulis, cuma dari mana script-nya dijalankan
+(`python eval_tools/evaluation.py ...`, lihat §12).
+
+File eksperimen versi lama (`pipeline1.py`/`comparison1.py`/`postprocessing1.py`/
+`vlm1.py`/`index1.html`/dst, disebut di versi lama peta file ini) SUDAH TIDAK
+ADA di repo — sudah dihapus/dibersihkan di sesi sebelum restructure ini,
+paragraf lama yang menyebut file-file itu masih ada dihapus dari sini.
 
 ## 14. Field & Rules (tidak berubah dari versi sebelumnya)
 
@@ -2378,3 +2479,395 @@ mayoritas jalan CPU di environment evaluasi), `MAX_CANVAS_HEIGHT_GPU=2200` /
    resource mesin cuma ~8GB RAM, sudah beberapa kali OOM/MemoryError). **V17:
    bisa OOM bahkan SATU evaluator/`--limit` kecil kalau RAM sistem lagi
    dipakai app lain user** — lihat §12 utk workaround batch-subprocess.
+7. (Restructure) Tulis update singkat & lugas — kayak reminder ke diri
+   sendiri, bukan laporan. Jangan tulis ulang apa yang sudah ada di bagian
+   lain file ini, cukup pointer ke section-nya. Baca `prd.md` dulu kalau
+   butuh gambaran scope/goals, baru masuk ke sini kalau butuh detail
+   eksperimen/root-cause.
+
+---
+
+## 16. Restructure — Kode dipindah ke folder (2026-09-18)
+
+Ini BUKAN perubahan fitur/logic. Semua ~20 file `.py` yang sebelumnya rata di
+root project sekarang dikelompokkan per tanggung jawab, biar gampang dicari.
+Detail lengkap ada di `prd.md` (bagian struktur project) — di sini cuma
+ringkasan apa yang berubah & cara verifikasinya.
+
+**Yang pindah:**
+- `core/` — `config.py`, `data_input.py`, `terbilang.py`, + `paths.py` baru
+  (satu tempat definisi `PROJECT_ROOT`/`ASSETS_DIR`/`OUTPUT_DIR`/dst, ganti 9
+  file yang sebelumnya masing-masing hitung `BASE_DIR = Path(__file__)...`
+  sendiri-sendiri).
+- `pipeline/` — `preprocessing.py`, `ocr.py`, `postprocessing.py`,
+  `dynamic_extraction.py`, `comparison.py`, `vlm.py`, `pipeline.py`.
+- `extractors/` — `extractors.py`, `signature_detector.py`,
+  `collapse_retry_worker.py`.
+- `eval_tools/` — `evaluation.py`, `stage_evaluation.py`, `compare_runs.py`,
+  `signature_diagnostics.py`, `live_evaluation.py`, `diagnose_collapse.py`,
+  `local_qwen_eval.py`.
+- Tetap di root: `app.py`, `static/`, `prd.md`, `handover.md`, data/model
+  dirs (`assets/`, `outputs/`, `uploads/`, `eval_runs/`, `models/`,
+  `downloaded_documents/`).
+
+**Yang TIDAK berubah:** isi logic tiap fungsi, nama file (tidak ada rename),
+struktur `eval_runs/`/`outputs/`/dll, cara `app.py` dijalankan
+(`python app.py`, uvicorn mount tetap sama).
+
+**Yang berubah (dampak ke cara pakai):** command CLI eval tools sekarang
+pakai prefix `eval_tools/` (lihat §12 yang sudah diupdate), mis.
+`python eval_tools/evaluation.py --dataset ...` bukan `python evaluation.py
+--dataset ...` lagi.
+
+**Kenapa `BASE_DIR = Path(__file__).resolve().parent` jadi masalah:** 9 file
+pakai pola ini utk cari folder root project (assets/models/eval_runs/dst) —
+benar SELAMA file-nya di root. Setelah pindah ke folder, `Path(__file__).parent`
+nunjuk ke folder BARU (mis. `pipeline/`), bukan root lagi. Fix: satu file
+`core/paths.py` yang hitung root dgn `.parent.parent`, semua modul lain
+import dari situ. Untuk script yang dijalankan langsung dari command line
+(semua isi `eval_tools/` + `extractors/collapse_retry_worker.py`), ditambah
+satu baris `sys.path.insert(0, ...)` di paling atas SEBELUM import
+`core`/`pipeline`/`extractors` — soalnya begitu file-nya sendiri dijalankan
+(`python eval_tools/evaluation.py`), Python taruh folder `eval_tools/` (bukan
+root) di `sys.path[0]`.
+
+**Cara import berubah, cara pakai fungsi TIDAK:** semua `import preprocessing
+as prep` dst berubah jadi `from pipeline import preprocessing as prep` (dan
+serupa utk `core`/`extractors`/`eval_tools`), tapi setelah baris import itu,
+semua pemanggilan fungsi (`prep.resolve_roi(...)` dst) PERSIS sama, tidak ada
+yang diubah. `pipeline.py` (di dalam folder `pipeline/`) dan `extractors.py`
+(di dalam folder `extractors/`) pakai bentuk `import pipeline.pipeline as
+pipeline` / `import extractors.extractors as extractors` supaya pemanggil
+lama yang sudah terbiasa `pipeline.run_pipeline(...)`/`extractors.run_v18(...)`
+tidak perlu ubah apa-apa selain baris import-nya.
+
+**Verifikasi yang sudah dilakukan sesi ini:**
+1. Smoke-import tiap paket satu-satu (`core`, lalu `pipeline`, lalu
+   `extractors`, lalu `eval_tools`, terakhir `app.py`) — semua OK, tidak ada
+   `ImportError`/`ModuleNotFoundError`.
+2. Tiap script CLI di `eval_tools/` dites `--help` (evaluation.py,
+   stage_evaluation.py, compare_runs.py, signature_diagnostics.py) — semua
+   jalan.
+3. `python extractors/collapse_retry_worker.py` (tanpa argumen) dites —
+   sampai ke pesan usage, artinya `from pipeline import vlm` di dalamnya
+   berhasil (subprocess worker ini sensitif krn dipanggil `subprocess.run`
+   dari `extractors.py`, bukan diimport biasa).
+4. Grep seluruh repo (bukan cuma folder baru) utk pola import lama
+   (`import preprocessing`, `import data_input`, dst tanpa prefix) — nol
+   hasil, tidak ada yang ketinggalan.
+5. Smoke test end-to-end nyata: `python eval_tools/evaluation.py --dataset
+   assets/ocr_evaluation.xlsx --label restructure_smoke --limit 2
+   --debug-dir none`. Hasilnya JUJUR: 2/2 dokumen gagal di stage OCR, TAPI
+   root cause-nya BUKAN restructure — error persis
+   `AttributeError: partially initialized module 'paddle' has no attribute
+   'tensor'`, yang SUDAH terdokumentasi sebelumnya (lihat teks lama di §9,
+   soal bug lingkungan PaddleX/paddle circular-import independen dari kode
+   proyek). Dikonfirmasi ulang sesi ini dgn cara paling telanjang: import
+   `paddleocr` sendirian tanpa kode proyek sama sekali (`from paddleocr
+   import PaddleOCR; PaddleOCR(...)`) — GAGAL dgn traceback yang berujung ke
+   `OSError: [WinError 127] ... Error loading
+   ".../nvidia/cudnn/bin/cudnn_cnn64_9.dll"`. Ini masalah DLL CUDA/cuDNN di
+   environment ini, sama sekali tidak menyentuh kode yang dipindah sesi ini.
+   Belum diperbaiki — di luar scope restructure, catat sbg known issue
+   lingkungan (lihat juga §10 kalau mau lanjut investigasi ini nanti).
+
+**Kesimpulan:** restructure selesai, wiring import terverifikasi bekerja,
+tidak ada logic yang berubah. Kegagalan OCR di smoke test adalah bug
+lingkungan yang sudah ada sebelum sesi ini, bukan regresi dari restructure.
+
+### 16.1 Fix — satu import lolos dari verifikasi awal (sesi lanjutan)
+
+User lapor app tidak bisa jalan sama sekali (`No module named 'preprocessing'`)
+langsung setelah restructure di atas — verifikasi §16 TERNYATA tidak cukup.
+
+**Root cause:** `pipeline/vlm.py` fungsi `_get_template_image()` (dipanggil
+oleh jalur Gemini/Qwen hosted & local utk ambil gambar template pembanding)
+punya `import preprocessing as prep` di DALAM badan fungsi, bukan di atas
+file. Verifikasi restructure kemarin cuma grep pola `^import`/`^from` (anchor
+ke awal baris) utk cari sisa import lama — lolos krn baris ini diindentasi
+(nested di dalam `if`). Smoke-import test (`python -c "import ..."`) juga
+tidak menyentuhnya krn `_get_template_image()` baru jalan saat dipanggil,
+bukan saat modul di-import.
+
+**Fix:** ganti jadi `from pipeline import preprocessing as prep` (baris
+986). Lalu ulang pencarian TANPA anchor `^` (`\s+(import|from) <nama modul
+lama>`) ke SELURUH repo — nol hasil lain, ini satu-satunya yang lolos.
+
+**Pelajaran:** kalau verifikasi restructure/import-path lagi (sesi
+berikutnya, folder mana pun), grep pola import HARUS termasuk yang
+diindentasi (lazy/deferred import di dalam fungsi), bukan cuma baris paling
+atas file — dan smoke-import saja tidak cukup, harus benar-benar PANGGIL
+fungsi yang isinya lazy-import (atau jalankan end-to-end lewat
+`eval_tools/evaluation.py`) sebelum yakin "sudah aman".
+
+**Diverifikasi ulang setelah fix:** smoke-import semua paket lagi (OK),
+panggil `vlm._get_template_image()` langsung (OK, kembalikan gambar template
+asli), re-run `eval_tools/evaluation.py --limit 2` (perilaku identik dgn
+sebelum fix ini — masih kena bug lingkungan paddle/cuDNN yang sama, TIDAK
+ada kegagalan baru), start `uvicorn app:app` + `GET /` (200 OK). Bersihkan jg
+`__pycache__/` sisa dari SEBELUM restructure di root project (isinya .pyc
+modul lama spt `preprocessing.cpython-311.pyc` yang file sumbernya sudah
+pindah — cuma bytecode cache basi, aman dihapus, di-gitignore, TIDAK
+memengaruhi Python manapun cari modul).
+
+## 17. Fix — reward_tunai/reward_non_tunai detail masih null (crop-based, engine qwen3_vl_local_yolos/qwen3_vl_local) (2026-09-18)
+
+User lapor lagi: `reward_tunai`/`reward_non_tunai` (nilai Rp di baris "Nilai
+Reward (termasuk pajak)") masih sering null di hasil. Root cause: follow-up
+call yang bertugas baca baris itu (`vlm.REWARD_TUNAI_DETAIL_PROMPT`/
+`REWARD_DETAIL_PROMPT`, dipanggil dari `_run_local_reward_detail_followup`)
+cuma pernah kirim gambar HALAMAN PENUH (`MAX_SIDE_FULL=1600px`) — baris
+tulisan tangan yang ditanya cuma ~19px tinggi di gambar itu, sama persis
+kelas masalah yang sudah pernah diperbaiki utk nama_nasabah/nomor_rekening/
+nominal_penempatan lewat close-up crop (V21).
+
+**Fix**: `extractors._get_weak_field_crops()` sekarang JUGA crop
+`reward_tunai`/`reward_non_tunai` (pakai `preprocessing.FIELD_CONFIG`'s
+`value_bbox` yang SUDAH ada dari era V18, cuma belum pernah disambungkan ke
+jalur VLM). Crop ini dikirim sbg gambar ke-3 (TAMBAHAN, bukan pengganti) ke
+follow-up call reward — persis pola yg sudah terbukti di V21, lewat
+parameter baru `reward_crops` (`extractors.py` -> `vlm.
+extract_direct_semantic_local`/`_majority` -> `_run_local_reward_detail_
+followup` -> `_extract_reward_tunai_detail_local`/`_extract_reward_detail_
+local`, semua `None`-default supaya `qwen3_vl_local` tanpa crop TETAP
+persis sama seperti sebelumnya). Dithread juga ke
+`_retry_collapsed_in_subprocess`/`collapse_retry_worker.py` biar collapse-
+retry tidak kehilangan fix ini. **Scope: HANYA `qwen3_vl_local_yolos` +
+`qwen3_vl_local`** (keduanya pakai helper follow-up yang sama) — hosted
+`qwen3_vl` & `gemini-3.8-flash` TIDAK disentuh (keputusan eksplisit user,
+Gemini bahkan tidak punya mekanisme follow-up sama sekali, beda pekerjaan
+lebih besar). V18 (`pipeline/`) juga TIDAK disentuh, cuma DIBACA
+(`FIELD_CONFIG`).
+
+**Diverifikasi NYATA, bukan cuma baca kode** (semua run pakai model lokal
+sungguhan, `downloaded_documents/` asli):
+1. Baseline SEBELUM fix: 3 dokumen (`bentuk_reward` tunai/non_tunai
+   campuran) — SEMUA `reward_tunai_detail`/`reward_non_tunai_detail`
+   kembali `None`. Cocok persis dgn laporan user.
+2. Investigasi 1 dokumen (`13EQ77C6tOZoWZ...`) yg TETAP `None` walau
+   crop-nya sendiri terbukti LEGIBLE (dicek visual langsung, isinya "Rp
+   600.000 (Enam Ratus Ribu Rupiah)") — dgn prompt LENGKAP (`REWARD_TUNAI_
+   DETAIL_PROMPT`), model tetap jawab null baik dikasih 1/2/3 gambar
+   (crop-saja, template+crop, atau template+halaman+crop). Ganti ke prompt
+   PENDEK/minimal (TANPA instruksi "jangan menebak") baru model mau
+   menjawab — TAPI jawabannya SALAH (1000000/"satu juta", bukan 600000).
+   **Kesimpulan jujur**: utk dokumen INI, bukan resolusi yg jadi penghalang
+   — model genuinely kesulitan baca tulisan tangan kursifnya, dan prompt
+   yg ketat ("jangan menebak") membuatnya milih null drpd menebak salah.
+   Prompt ketat itu TIDAK diubah/dilonggarkan (menjawab salah dgn percaya
+   diri lebih buruk drpd null jujur — prinsip yg sama dgn fix V22 mirrored-
+   placeholder, lihat §9l) — ini didokumentasikan sbg keterbatasan yg
+   tersisa, BUKAN dicoba "diperbaiki" dgn melonggarkan instruksi.
+3. Test lebih luas: 8 dokumen (GT "Cashback"/tunai), SATU proses (model
+   dimuat sekali), `reward_tunai_detail` dibandingkan TANPA crop vs DENGAN
+   crop:
+   | hasil | jumlah dokumen |
+   |---|---|
+   | sudah benar SEBELUM fix, TETAP sama sesudah (tidak berubah) | 3/8 |
+   | **null SEBELUM fix -> nilai asli terbaca SESUDAH fix** | **3/8** |
+   | tetap null baik sebelum maupun sesudah (kasus sulit, spt poin 2) | 2/8 |
+   | jadi salah/regresi krn fix ini | **0/8** |
+
+   3 nilai baru yg berhasil diekstrak (32500000/"tiga puluh dua juta lima
+   ratus ribu rupiah", 500000/"lima ratus ribu rupiah", 40000/"empat puluh
+   ribu rupiah") SEMUA konsisten digit-vs-terbilang saat dicek manual
+   (dikonfirmasi jg oleh `comparison.validate_nominal_terbilang` yg
+   sekarang disambungkan ke pasangan reward juga, lihat di bawah) — bukan
+   angka asal tebak. Catatan jujur terpisah (BUKAN akibat fix ini, sudah
+   ada sebelumnya di kedua kolom tanpa-crop/dengan-crop): 1 dokumen
+   (`1a7X78Si8DTJ...`) hasil digit (48750000) tidak cocok dgn terbilang-nya
+   sendiri ("empat puluh delapan juta" = 48000000, hilang bagian "tujuh
+   ratus lima puluh ribu") — transkripsi terbilang yg terpotong, di luar
+   scope sesi ini.
+4. Regresi ke field lain: `eval_tools/evaluation.py --engine
+   qwen3_vl_local_yolos --limit 5 --debug-dir none` (label
+   `reward_fix_smoke`) — 0 kegagalan pipeline di 5 dokumen manapun
+   (`failure_stage_breakdown` semua nol), `bentuk_reward` 1.0,
+   `nama_nasabah`/`nomor_rekening`/`nominal_penempatan`/`tenor_penempatan`
+   dalam rentang wajar (bukan bukti definitif n=5 kecil, tapi cukup utk
+   pastikan tidak ada crash/collapse baru — perubahan ini scr kode memang
+   tidak pernah menyentuh gambar/prompt main call field-field itu).
+
+**Tambahan diagnostic (measurement-only, TIDAK masuk keputusan OK/TOLAK/
+REVIEW)**: `comparison.validate_nominal_terbilang` (sudah ada sejak V21/V22
+utk `nominal_penempatan`) sekarang JUGA dipanggil dgn
+`digit_field="reward_tunai_detail", terbilang_field="reward_tunai_terbilang"`
+di `evaluation.py` (`reward_terbilang_verdict`/`reward_terbilang_both_
+evidence_read_count`/`reward_terbilang_internal_consistency_rate` di
+summary) dan `live_evaluation.py` (`reward_terbilang` stat di popup
+"Evaluasi"). Alasan: `reward_tunai` tidak punya kolom ground truth di
+spreadsheet, jadi consistency-rate ini SATU-SATUNYA sinyal terukur yg ada
+utk memantau apakah fix ini masih bekerja di sesi-sesi berikutnya.
+
+**Yang TIDAK diklaim selesai**: 2/8 dokumen di test poin 3 TETAP tidak
+terbaca (keterbatasan model/handwriting genuine, bukan soal ROI/resolusi
+lagi — lihat poin 2). Hosted `qwen3_vl` & Gemini TIDAK mendapat perbaikan
+ini sama sekali (lihat scope di atas). `reward_non_tunai_detail` (deskripsi
+barang non-tunai) dapat perbaikan KODE yg sama (crop `reward_non_tunai`)
+tapi belum diverifikasi seluas `reward_tunai_detail` di atas (dataset ini
+mayoritas tunai, jalur non-tunai jarang ke-exercise) — kalau ada laporan
+serupa utk non-tunai spesifik, ukur dulu sebelum asumsi sama-sama membaik.
+
+## 18. Sesi lanjutan — nama_nasabah threshold, tenor date-range abstraction, choice-field investigation (2026-09-18)
+
+User lapor "no different on performance" utk fix reward di §17 — dikonfirmasi
+lewat pertanyaan: yang dicek adalah dashboard field/decision-accuracy, yang
+memang TIDAK BISA bergerak dari fix itu (`reward_tunai` tidak punya kolom
+ground truth, sejak awal tidak masuk `FIELD_GT_MAP`). Bukan tanda fix-nya
+gagal — bukti riil session lalu (3/8 dokumen null→nilai benar, 0 regresi)
+tetap berlaku. Tidak ada aksi kode di poin ini, cuma catatan supaya tidak
+disalahpahami lagi sesi depan.
+
+**18a. `NAME_PASS_THRESHOLD` 90 → 80 (`pipeline/comparison.py`), SELESAI.**
+User minta threshold "uncertain" utk nama_nasabah diturunkan supaya lebih
+banyak match borderline-tapi-benar jatuh ke "sesuai", TAPI bucket uncertain
+sendiri harus tetap ada (bukan dihapus, beda dari mismatch). Root cause:
+kode (90) TERNYATA sudah beda dari spec yang sudah lama didokumentasikan
+(`handover.md` §14 / `prd.md` §7: "Nama (fuzzy match 80%)") — 90 tidak
+pernah disamakan ke situ. Diverifikasi thd similarity SUNGGUHAN yang sudah
+tersimpan di `eval_runs/*.csv` (bukan tebakan): 6 pasangan nama jatuh di
+rentang [80,90) — 5/6 GENUINE match cuma beda noise OCR ("Qurib
+Ramadhani"/"Qurbi ramadhan"=89.7, 3 varian "CV PERMATA AGROTANI
+KENCANA"=87-89.3), yang SEBELUMNYA salah kena "perlu_review". 1/6 lebih
+borderline ("CV. Agrotani Kencana" vs "CV PERMATA AGROTANI KENCANA"=80.9,
+kehilangan 1 kata "PERMATA" sepenuhnya) — dicatat jujur, bukan alasan utk
+batal, krn rasio 5:1 & sudah sesuai spec yang sudah disepakati.
+`NAME_MISMATCH_THRESHOLD` (55) TIDAK diubah — bucket uncertain (55-79
+sekarang, dulu 55-89) tetap ada, cuma diperkecil. Diverifikasi ulang lewat
+`comparison.is_field_match` langsung: `("Qurib Ramadhani","Qurbi
+ramadhan")` sekarang `(True, 89.7)` (dulu `("uncertain", 89.7)`), sementara
+`("Nuryani","Mulyani")=71.4` tetap `"uncertain"` seperti seharusnya.
+
+**18b. Tenor date-range: hapus round-trip digit→teks→re-parse
+(`extractors.py` + `pipeline/postprocessing.py`), SELESAI.** User bilang
+transformasi dd/mm/yy ke "alphabetical" terasa "abstract" — dikonfirmasi
+NYATA: alur lama VLM keluarkan ISO `YYYY-MM-DD` → `extractors._format_id_date`
+ubah ke teks nama-bulan Indonesia ("14 Agustus 2026") → digabung jadi satu
+string → `postprocessing._extract_dates` regex-parse teks itu BALIK jadi
+objek `date` → hitung selisih bulan. Konversi teks itu HANYA ada supaya
+parser lama (didesain utk teks OCR gabungan V18) bisa dipakai lagi —
+murni indirection utk data yang sebenarnya sudah bersih (ISO). Bug
+tersembunyi: `_format_id_date`'s `except Exception: return None` diam-diam
+menelan SEMUA kegagalan format, membuat `rentang_tenor.status=
+"not_detected"` yang TIDAK BISA dibedakan dari "field memang kosong" di
+output eval (dikonfirmasi: 12/25 baris `tenor_date_range_derived` di satu
+eval run nyata semuanya `N/A`, sumbernya campur aduk).
+
+Fix: `postprocessing.tenor_from_date_pair(d1, d2)` (baru) — inti logic
+`derive_tenor_from_range` (selisih bulan kalender → opsi 1/3/6 terdekat)
+dipisah jadi fungsi sendiri yang terima 2 objek `date` LANGSUNG.
+`derive_tenor_from_range(raw_text)` (V18/OCR, TIDAK berubah perilakunya)
+tetap `_extract_dates` lalu delegasi ke fungsi baru ini. `extractors.py`
+sekarang parse ISO string VLM LANGSUNG (`_parse_iso_date`, pakai
+`datetime.date.fromisoformat`) & simpan sbg `rentang_tenor["dates_iso"]`
+(STRING, bukan objek `date` — sengaja, supaya tetap aman di-JSON-kan kalau
+`raw_json`/export menyentuhnya suatu saat). `comparison.validate_tenor`
+skrg cek `dates_iso` dulu (parse ulang + `tenor_from_date_pair` langsung)
+SEBELUM fallback ke `derive_tenor_from_range(raw_text)` yang lama — V18
+sama sekali tidak ke-touch krn tidak pernah mengisi `dates_iso`.
+Efek samping positif: reason kegagalan sekarang beda antara "field kosong"
+vs `"iso_tanggal_tidak_valid"` (VLM keluar format aneh) — tidak collapse
+jadi satu "N/A" lagi.
+
+**Investigasi false-alarm (dicatat supaya tidak diulang)**: sempat curiga
+ada bug type-mismatch (`choice_value` string "3" vs `derived_value` int 3
+di `validate_tenor`, bikin `!=` SELALU True) berdasar trace parsial
+`vlm._canonicalize_tenor_penempatan` (return string). TERNYATA SALAH —
+`extractors._adapt_qwen_to_common` (baris ~1086) sudah cast `int()` sebelum
+disimpan, jadi `choice_value` di production memang int, cocok dgn
+`derived_value`. Dikonfirmasi lewat test langsung end-to-end
+(`_adapt_qwen_to_common({"tenor_penempatan": {"value": "3", ...}})` →
+`{"value": 3, ...}`, tipe int). **Pelajaran**: jangan simpulkan bug dari
+SATU fungsi return type saja — trace SAMPAI titik pemakaian sungguhan,
+persis prinsip §11 yang sudah berkali-kali dicatat di file ini.
+
+Diverifikasi: unit test `tenor_from_date_pair`/`validate_tenor` (dates_iso
+vs text-fallback, keduanya hasil IDENTIK utk pasangan tanggal yang sama;
+reversed-range & invalid-ISO masing2 dapat reason yang benar), plus
+`eval_tools/evaluation.py --engine qwen3_vl_local_yolos --limit 5` (label
+`session2_smoke`) — 0 kegagalan, angka field accuracy identik dgn baseline
+sebelum sesi ini (`nama_nasabah` 0.2, `nomor_rekening` 0.4, `nominal_
+penempatan`/`tenor_penempatan` 0.8, `bentuk_reward` 1.0) — tidak ada
+regresi dari 18a maupun 18b.
+
+**18c. Choice-field (`tenor_penempatan`/`bentuk_reward`) — 2 pendekatan
+DICOBA, KEDUANYA tidak dipromosikan, dgn bukti nyata knp.** User pilih 2
+dari 3 opsi yang diajukan: crop close-up + ink-diff V18 sbg authoritative
+override. Sengaja dicoba SATU-SATU (bukan digabung) supaya efeknya bisa
+diukur terpisah.
+
+*Crop close-up (`extractors.py`, DICOBA & DIHAPUS — bukan cuma dimatikan).*
+Sama pola dgn fix reward (§17): crop garis pilihan (union `anchor_bbox` +
+semua `options` dari `preprocessing.CHOICE_GROUPS`, fungsi
+`_choice_group_bbox`), ditambahkan ke `extra_crops` MAIN call (bukan
+follow-up terpisah, krn tenor/reward dibaca di call utama). Butuh padding
+JAUH lebih besar dari perkiraan awal (0.3→1.5) krn ditemukan drift
+block-shift asli ~30-35px pada satu dokumen (`13EQ77C6tOZoWZ...`) — mirip
+persis temuan V15 lama, cuma sekarang kena box yang lebih tipis sehingga
+tidak lolos begitu saja spt `reward_tunai`/`nominal_penempatan` (yang
+kebetulan selamat krn padding mereka sudah 0.5-1.0 utk alasan lain).
+Divisualisasikan LANGSUNG (crop di-render, dibaca manual) sebelum & sesudah
+naikkan padding — dikonfirmasi bekerja pada 2/3 dokumen spot-check.
+
+**TAPI tes NYATA end-to-end (8 dokumen, model lokal sungguhan, extra_crops
+dgn vs tanpa crop pilihan) nunjukkin HASIL BERSIH: 7/8 IDENTIK (termasuk
+`bentuk_reward` 8/8 TIDAK berubah sama sekali — prioritas utama TIDAK
+regresi TERPENUHI), TAPI 1/8 REGRESI nyata** (record 8: GT tenor=6, crop
+divisualisasikan CRYSTAL CLEAR — "1/3" dicoret, "6" dilingkari jelas —
+TETAP dibaca salah jadi "3" DENGAN crop, padahal benar "6" TANPA crop).
+Beda kelas masalah dgn fix reward: di situ resolusi memang penghalang
+utama; di sini model bisa salah baca WALAU gambarnya sudah jelas & besar —
+menambah gambar redundan kadang malah mengganggu bacaan halaman-penuh yang
+sudah benar, bukan cuma menambah info. **Kode DIHAPUS TOTAL** (bukan
+dibiarkan idle) — `CHOICE_CROP_TARGETS`/`_choice_group_bbox`/
+`CHOICE_CROP_PAD_RATIO` semua dibuang dari `extractors.py`, `vlm.py`'s
+`_WEAK_FIELD_CROP_LABELS` dikembalikan ke 3 field asli. **Jangan diulang
+tanpa sampel lebih besar & hipotesis konkret knp regresi ini terjadi.**
+
+*Ink-diff V18 sbg cross-check (`extractors.py`, DIBANGUN sbg
+DIAGNOSTIC-ONLY, TIDAK dipromosikan jadi override).* Sesuai rencana
+staged-rollout eksplisit (ukur dulu sebelum percaya, persis pelajaran dari
+percobaan crop di atas): `_get_weak_field_crops` sekarang JUGA memanggil
+`postprocessing.process_choices()` (mekanisme ink-diff piksel V18 yang
+frozen, BUKAN OCR) pakai alignment yang SAMA (satu pass, tidak dobel),
+return berubah jadi `(crops, choice_ink_diff)`. `_choice_ink_diff_diagnostic`
+(baru) bandingkan verdict ink-diff vs bacaan Qwen sendiri, disimpan di
+`ocr_meta["choice_ink_diff_diagnostic"]` — **TIDAK PERNAH mengubah
+`final_results`/keputusan**, murni observasi.
+
+**Hasil ukur NYATA (12 dokumen, murni geometri, tanpa panggil VLM sama
+sekali — cepat)**: ink-diff mentah (`process_choices`) balik `status=
+"review"` (ambigu) utk **KEDUA field, di SEMUA 12/12 dokumen, tanpa
+kecuali** — beberapa malah dgn skor SANGAT TINGGI di SEMUA opsi sekaligus
+(mis. record 5: skor tenor 0.94/0.93/0.91 utk opsi 1/3/6 — ketiganya
+"berubah banyak", bukan cuma satu). Diselidiki apakah ini bug pemanggilan
+(cross-check urutan argumen thd `pipeline.py`'s pemanggilan V18 sendiri) —
+TERNYATA IDENTIK, bukan bug. Kesimpulan yang lebih masuk akal (dibaca dari
+`postprocessing.resolve_bentuk_reward`'s docstring sendiri): akurasi tinggi
+V18 utk `bentuk_reward` SELAMA INI bukan dari ink-diff mentah yang selalu
+yakin, tapi dari LAPISAN KEDUA (`resolve_bentuk_reward`/`resolve_tenor_source`
+fallback ke bukti teks OCR `reward_tunai`/`reward_non_tunai`/`rentang_tenor`
+saat ink-diff sendiri ambigu) — lapisan kedua itu TIDAK ADA utk engine VLM
+ini (tidak ada field OCR terpisah yang setara). Jadi ink-diff mentah SAJA,
+tanpa lapisan kedua itu, memang wajar sering ambigu — bukan mekanismenya
+rusak, tapi memang didesain utk dipakai BERSAMA bukti lain yang di sini
+tidak tersedia.
+
+**Keputusan**: TIDAK dipromosikan jadi authoritative override — dgn data
+100% ambigu, override itu tidak akan pernah aktif sama sekali (aman, tapi
+percuma). Kode diagnostic-only DIPERTAHANKAN (murah, reuse alignment yang
+sudah ada, tidak pernah mengubah hasil) sbg sinyal terukur kalau nanti ada
+yang mau membangun lapisan kedua yang setara (mis. VLM's own tenor/reward
+reading SEBAGAI bukti teks pengganti OCR, dipasang ke `resolve_bentuk_
+reward`-style resolver yang baru). **Next step yang valid** kalau mau
+lanjutkan choice-field ini: bangun lapisan kedua itu, BUKAN ulangi crop
+(§18c poin 1) atau menaikkan ink-diff jadi override tanpa lapisan kedua
+(sudah terbukti percuma di sini).
+
+**Ringkasan jujur sesi ini**: 2/4 item selesai bersih dgn perbaikan nyata &
+nol regresi (18a, 18b). 1/4 item DICOBA & dibuang dgn bukti konkret knp
+(18c crop). 1/4 item dibangun sbg fondasi diagnostic yang benar tapi belum
+bisa dipromosikan krn prasyaratnya (lapisan kedua bukti) belum ada (18c
+ink-diff). Tidak ada yang dipaksakan "selesai" tanpa bukti — sesuai prinsip
+§15 file ini.
+serupa utk non-tunai spesifik, ukur dulu sebelum asumsi sama-sama membaik.

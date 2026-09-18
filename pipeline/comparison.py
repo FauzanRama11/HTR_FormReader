@@ -5,10 +5,12 @@ Bandingkan nilai "Data Entry" (dari Excel/Google Spreadsheet) dengan hasil
 OCR untuk field yang sama, lalu tandai match/mismatch.
 """
 
+import datetime
 import re
 from difflib import SequenceMatcher
 
-from postprocessing import derive_tenor_from_range
+from pipeline.postprocessing import derive_tenor_from_range, tenor_from_date_pair
+from core.terbilang import parse_terbilang
 
 # Kolom spreadsheet -> nama field pipeline. Kolom yang tidak ada di sini
 # (Regional Office, Nama Branch Office, Surat Pernyataan) hanya ditampilkan
@@ -42,7 +44,22 @@ FIELD_DATA_TYPES = {
 # Ratem=100 -> PASS, Ratem/Ratzen=72.7 & Mulyani/Nuryani=71.4 -> UNCERTAIN,
 # Ratem/Asep=44.4 -> MISMATCH. Nomor rekening/nominal TETAP exact/
 # deterministic (tidak lewat jalur ini).
-NAME_PASS_THRESHOLD = 90
+#
+# (session lanjutan) NAME_PASS_THRESHOLD diturunkan 90 -> 80: nilai 90
+# TERNYATA sudah beda dari spec yg sudah didokumentasikan sejak lama
+# (handover.md SS14 / prd.md SS7: "Nama (fuzzy match 80%)") -- kode tidak
+# pernah disamakan ke spec itu. Diverifikasi thd similarity SUNGGUHAN yg
+# sudah tersimpan di eval_runs/*.csv (bukan tebakan): 6 pasangan nama jatuh
+# di rentang [80,90) -- 5/6 GENUINE match yg cuma beda noise OCR ("Qurib
+# Ramadhani"/"Qurbi ramadhan"=89.7, 3x varian "CV PERMATA AGROTANI KENCANA"
+# 87-89), yg SEBELUMNYA salah kena "perlu_review" walau jelas org/entitas yg
+# sama. 1/6 lebih borderline ("CV. Agrotani Kencana" vs "CV PERMATA AGROTANI
+# KENCANA"=80.9, kehilangan 1 kata "PERMATA" sepenuhnya) -- dicatat jujur,
+# bukan alasan utk TIDAK menurunkan (rasio 5:1 & sudah sesuai spec yg
+# didokumentasikan). NAME_MISMATCH_THRESHOLD TIDAK diubah -- bucket
+# "uncertain" (55-79 sekarang, dulu 55-89) tetap ada, cuma diperkecil,
+# BUKAN dihapus.
+NAME_PASS_THRESHOLD = 80
 NAME_MISMATCH_THRESHOLD = 55
 
 
@@ -357,8 +374,25 @@ def validate_tenor(raw_results, choice_groups, ref_tenor):
     dipakai sbg tampilan evidence, bukan keputusan)."""
     choice = choice_groups.get("tenor_penempatan", {})
     choice_value, choice_status = choice.get("value"), choice.get("status")
-    range_raw = (raw_results.get("rentang_tenor") or {}).get("raw")
-    derived_value, derive_reason = derive_tenor_from_range(range_raw)
+    rentang = raw_results.get("rentang_tenor") or {}
+    range_raw = rentang.get("raw")
+    # "dates_iso" (added alongside the VLM-engine tenor fix): the 2 raw ISO
+    # strings, when the source had clean ISO dates (extractors.py) -- parse
+    # fresh here and compute the month-diff DIRECTLY, instead of regex-
+    # parsing `range_raw`'s human-readable display text back into dates
+    # (the old round trip -- still the only option for V18/OCR sources,
+    # which never set "dates_iso" at all and only ever have raw text).
+    dates_iso = rentang.get("dates_iso")
+    derived_value = derive_reason = None
+    if dates_iso:
+        try:
+            d1 = datetime.date.fromisoformat(dates_iso[0])
+            d2 = datetime.date.fromisoformat(dates_iso[1])
+            derived_value, derive_reason = tenor_from_date_pair(d1, d2)
+        except (ValueError, TypeError):
+            pass  # fall through to text-parsing below
+    if derive_reason is None:
+        derived_value, derive_reason = derive_tenor_from_range(range_raw)
     evidence = {
         "choice": choice_value, "date_range_derived": derived_value, "date_range_raw": range_raw,
         "date_range_derive_reason": derive_reason,
@@ -413,6 +447,44 @@ def validate_reward(raw_results, choice_groups, ref_reward):
     if choice_value != ref_bucket:
         return "TOLAK", f"Bentuk reward tidak sesuai: dokumen={choice_value}, referensi={ref_reward}", evidence
     return "OK", None, evidence
+
+
+def validate_nominal_terbilang(raw_results, digit_field="nominal_penempatan",
+                                terbilang_field="nominal_penempatan_terbilang"):
+    """DIAGNOSTIC ONLY (V21) -- NOT wired into compute_decision_v9_2/rural's
+    OK/TOLAK/REVIEW output in this pass. This is a brand-new check with no
+    real-data accuracy measurement yet; promoting it to a decisive check
+    (the way validate_tenor/validate_reward already are) is a deliberate,
+    separate follow-up once that's measured -- see handover.md V21.
+
+    Modeled directly on validate_tenor/validate_reward's "two independently-
+    read pieces of evidence must agree" pattern, applied here to a digit
+    amount vs. that SAME amount's spelled-out words (terbilang.py), both
+    read independently from the SAME AI response (see vlm.
+    DIRECT_SEMANTIC_PROMPT's nominal_penempatan_terbilang field / vlm.
+    REWARD_TUNAI_DETAIL_PROMPT's reward_tunai_terbilang field -- `digit_
+    field`/`terbilang_field` select which pair to check).
+
+    Returns (verdict, reason, evidence) -- verdict is "consistent" /
+    "inconsistent" / "evidence_missing", a DELIBERATELY different vocabulary
+    from OK/TOLAK/REVIEW so it can never be mistaken for a real decision
+    verdict if read out of context."""
+    digit_raw = (raw_results.get(digit_field) or {}).get("value")
+    terbilang_raw = (raw_results.get(terbilang_field) or {}).get("value")
+    digit_value = _normalize_for_compare(digit_raw, "currency")
+    parsed_terbilang = parse_terbilang(terbilang_raw)
+    evidence = {
+        "digit_value": digit_value or None, "terbilang_raw": terbilang_raw,
+        "terbilang_parsed": parsed_terbilang,
+    }
+
+    if not digit_value or parsed_terbilang is None:
+        return "evidence_missing", f"{digit_field}: digit atau terbilang tidak terbaca/tidak bisa diparse", evidence
+    if int(digit_value) != parsed_terbilang:
+        return ("inconsistent",
+                f"{digit_field} tidak konsisten: digit={digit_value}, terbilang={terbilang_raw!r} (={parsed_terbilang})",
+                evidence)
+    return "consistent", None, evidence
 
 
 def validate_signature(name, sig_result):

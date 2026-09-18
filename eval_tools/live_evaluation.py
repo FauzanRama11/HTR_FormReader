@@ -32,8 +32,9 @@ and does not infer.
 """
 import re
 
-import comparison
-import extractors
+from pipeline import comparison
+from eval_tools import evaluation
+import extractors.extractors as extractors
 
 # The SAME 5-field map app.py's comparison.attach_data_entry already uses --
 # sourced from comparison.py so this list can never drift out of sync with it.
@@ -250,6 +251,98 @@ def _confusion_matrix_signature(results, field):
     return cm
 
 
+def _decision_accuracy_stats(results):
+    """Overall OK-vs-TOLAK decision accuracy, per explicit user decision
+    (distinct from _field_accuracy_stats above, which is per-FIELD).
+    Ground truth: reuses evaluation._map_ground_truth_decision verbatim
+    (same prefix rule already proven in the standalone CLI evaluator --
+    "ok"/"oke"/... -> "OK", "tolak..." -> "TOLAK", anything else/blank ->
+    excluded) so this live metric can never quietly diverge from the CLI
+    tool's definition of the same thing.
+
+    Predicted: the record's OWN already-computed comparison.compute_decision
+    result (session['results'][n]['decision_v9_2']['decision'] -- see
+    app.py's _process_one_record), folded to binary: "OK" only for an exact
+    "OK" token, everything else ("TOLAK" OR "REVIEW") folded into "TOLAK".
+    Per explicit user decision: a document the system flags for manual
+    Review is treated the same as a Tolak for this score (neither is an
+    auto-approval) -- ground truth in the real dataset never contains a
+    "Review" value itself (verified against assets/ocr_evaluation.xlsx), so
+    this folding only ever affects the PREDICTED side.
+
+    A record excluded from BOTH sides at once (no ground truth, e.g. blank
+    verification-status cell) contributes to neither the numerator nor the
+    denominator -- same "don't count missing GT as wrong" principle already
+    used throughout this file (_field_accuracy_stats' "uncertain" handling,
+    _confusion_matrix_signature's have_verif_column gate)."""
+    total_with_gt = correct = false_accept = false_reject = 0
+    gt_tolak = gt_ok = review_folded_into_tolak = 0
+    for result in results:
+        record = result.get("record") or {}
+        gt = evaluation._map_ground_truth_decision(record.get(_VERIF_COLUMN))
+        if gt is None:
+            continue
+        predicted_token = (result.get("decision_v9_2") or {}).get("decision")
+        if predicted_token is None:
+            continue
+        if predicted_token == "REVIEW":
+            review_folded_into_tolak += 1
+        predicted = "OK" if predicted_token == "OK" else "TOLAK"
+
+        total_with_gt += 1
+        gt_tolak += gt == "TOLAK"
+        gt_ok += gt == "OK"
+        if predicted == gt:
+            correct += 1
+        elif gt == "TOLAK" and predicted == "OK":
+            false_accept += 1
+        elif gt == "OK" and predicted == "TOLAK":
+            false_reject += 1
+
+    return {
+        "total_with_ground_truth": total_with_gt,
+        "correct_count": correct,
+        "accuracy": round(correct / total_with_gt, 4) if total_with_gt else "N/A",
+        "false_accept_count": false_accept,
+        "false_accept_rate": round(false_accept / gt_tolak, 4) if gt_tolak else "N/A",
+        "false_reject_count": false_reject,
+        "false_reject_rate": round(false_reject / gt_ok, 4) if gt_ok else "N/A",
+        "review_folded_into_tolak_count": review_folded_into_tolak,
+    }
+
+
+def _nominal_terbilang_stats(results, digit_field="nominal_penempatan",
+                              terbilang_field="nominal_penempatan_terbilang"):
+    """Live counterpart of evaluation.py's nominal_terbilang_both_evidence_
+    read_count/nominal_terbilang_internal_consistency_rate -- reuses
+    comparison.validate_nominal_terbilang directly against each result's
+    already-stored raw_results (same source app.py's own decision
+    computation already reads from, see app.py's _process_one_record) so
+    this can never compute a different verdict than what the record's own
+    processing already determined. DIAGNOSTIC ONLY, same as the CLI
+    evaluator's version -- not part of the OK/TOLAK decision.
+
+    `digit_field`/`terbilang_field` (added alongside the reward-detail
+    crop fix): same generic pair-selection comparison.validate_nominal_
+    terbilang already supports, defaulting to the original nominal_
+    penempatan pair so the existing call site below is unaffected. Reused
+    for reward_tunai_detail/reward_tunai_terbilang via a second call site."""
+    both_evidence = consistent = 0
+    for result in results:
+        raw_results = result.get("raw_results") or {}
+        verdict, _reason, _evidence = comparison.validate_nominal_terbilang(
+            raw_results, digit_field=digit_field, terbilang_field=terbilang_field,
+        )
+        if verdict in ("consistent", "inconsistent"):
+            both_evidence += 1
+            if verdict == "consistent":
+                consistent += 1
+    return {
+        "both_evidence_read_count": both_evidence,
+        "internal_consistency_rate": round(consistent / both_evidence, 4) if both_evidence else "N/A",
+    }
+
+
 def _runtime_stats(results):
     """ONLY over records whose stored result has processing_time_seconds --
     gracefully skips older records missing it (no zero-fill/crash)."""
@@ -347,6 +440,11 @@ def build_session_evaluation(session):
         "documents_evaluated": documents_evaluated,
         "documents_total": documents_total,
         "overall": overall,
+        "decision_accuracy": _decision_accuracy_stats(results),
+        "nominal_terbilang": _nominal_terbilang_stats(results),
+        "reward_terbilang": _nominal_terbilang_stats(
+            results, digit_field="reward_tunai_detail", terbilang_field="reward_tunai_terbilang",
+        ),
         "field_accuracy": field_accuracy,
         "confusion_matrices": confusion_matrices,
         "runtime": _runtime_stats(results),

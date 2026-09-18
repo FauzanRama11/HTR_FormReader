@@ -35,11 +35,19 @@ lifetime -- never reloaded per document.
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+from core.paths import MODELS_DIR
 
 # Generic (not vendor-named) env var names -- the underlying model may
 # change again later, same convention as vlm.py's VLM_MODEL_PATH.
 SIGNATURE_DETECTOR_MODEL_PATH = os.environ.get("SIGNATURE_DETECTOR_MODEL_PATH", "").strip()
+
+# Same convention/override as vlm.py's VLM_DEVICE -- "auto" picks CUDA when
+# available. Previously this module never called .to(device) at all, so it
+# silently ran on CPU even when Qwen (vlm.py) was using the GPU in the same
+# process/request. YOLOS-tiny is small enough that this is a pure speed
+# lever (no quantization, no VRAM-budget interaction with the 4-bit Qwen
+# model worth worrying about).
+SIGNATURE_DETECTOR_DEVICE_ENV = os.environ.get("SIGNATURE_DETECTOR_DEVICE", "auto").strip().lower()
 
 # YOLOS detection-proposal confidence threshold (NOT the same as
 # extractors.SIGNATURE_CONFIDENCE_UNCERTAIN_THRESHOLD = 0.6, the separate,
@@ -51,12 +59,23 @@ SIGNATURE_DETECTOR_MODEL_PATH = os.environ.get("SIGNATURE_DETECTOR_MODEL_PATH", 
 SIGNATURE_DETECTOR_CONF_THRESHOLD = float(os.environ.get("SIGNATURE_DETECTOR_CONF_THRESHOLD", "0.25"))
 
 DEFAULT_LOCAL_CANDIDATES = [
-    BASE_DIR / "models" / "yolos-tiny-signature-detection",
+    MODELS_DIR / "yolos-tiny-signature-detection",
     Path("C:/models/yolos-tiny-signature-detection"),
 ]
 
 _model = None
 _processor = None
+_device = None
+
+
+def _choose_device(torch):
+    if SIGNATURE_DETECTOR_DEVICE_ENV not in {"", "auto"}:
+        if SIGNATURE_DETECTOR_DEVICE_ENV.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                "SIGNATURE_DETECTOR_DEVICE meminta CUDA tetapi CUDA tidak tersedia pada PyTorch saat ini."
+            )
+        return SIGNATURE_DETECTOR_DEVICE_ENV
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _resolve_model_path():
@@ -98,22 +117,24 @@ def is_ready():
 
 
 def _load():
-    global _model, _processor
+    global _model, _processor, _device
     if _model is not None:
-        return _model, _processor
+        return _model, _processor, _device
     try:
+        import torch
         from transformers import AutoImageProcessor, AutoModelForObjectDetection
     except ImportError as exc:
         raise RuntimeError(
             f"transformers package not installed ({exc}). Run: pip install -r requirements.txt"
         ) from exc
     model_path = _resolve_model_path()
+    _device = _choose_device(torch)
     # from_pretrained(<local directory>) -- a local path never touches the
     # network, unlike passing a HF repo id. This is the only place in the
     # module that touches the model files.
     _processor = AutoImageProcessor.from_pretrained(model_path)
-    _model = AutoModelForObjectDetection.from_pretrained(model_path).eval()
-    return _model, _processor
+    _model = AutoModelForObjectDetection.from_pretrained(model_path).eval().to(_device)
+    return _model, _processor, _device
 
 
 def detect_signatures(image_bgr, conf_threshold=None):
@@ -126,18 +147,18 @@ def detect_signatures(image_bgr, conf_threshold=None):
     import cv2
     from PIL import Image
 
-    model, processor = _load()
+    model, processor, device = _load()
     conf = conf_threshold if conf_threshold is not None else SIGNATURE_DETECTOR_CONF_THRESHOLD
 
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     pil_image = Image.fromarray(image_rgb)
     h, w = image_bgr.shape[0], image_bgr.shape[1]
 
-    inputs = processor(images=pil_image, return_tensors="pt")
+    inputs = processor(images=pil_image, return_tensors="pt").to(device)
     with torch.no_grad():
         outputs = model(**inputs)
 
-    target_sizes = torch.tensor([(h, w)])
+    target_sizes = torch.tensor([(h, w)], device=device)
     results = processor.post_process_object_detection(outputs, threshold=conf, target_sizes=target_sizes)[0]
 
     detections = []

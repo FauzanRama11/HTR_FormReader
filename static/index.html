@@ -2010,8 +2010,19 @@ function renderEvaluationModal(data) {
       <div class="eval-summary-tile"><b>${evalFmtPct(o.precision_macro)}</b>Precision Macro</div>
       <div class="eval-summary-tile"><b>${evalFmtPct(o.recall_macro)}</b>Recall Macro</div>
       <div class="eval-summary-tile"><b>${evalFmtPct(o.f1_macro)}</b>F1 Macro</div>
+      <div class="eval-summary-tile"><b>${evalFmtPct((data.decision_accuracy || {}).accuracy)}</b>Decision Accuracy (OK/TOLAK)</div>
       <div class="eval-summary-tile"><b>${evalFmtSec(data.runtime && data.runtime.average_seconds)}</b>Avg Runtime / Doc</div>
     </div>`;
+
+  const da = data.decision_accuracy || {};
+  const decisionAccuracyHtml = `
+    <div class="eval-section-title">Decision Accuracy (OK vs TOLAK)</div>
+    <table class="eval-table"><tbody>
+      <tr><td>Accuracy</td><td>${evalFmtPct(da.accuracy)} (${da.correct_count ?? 0}/${da.total_with_ground_truth ?? 0})</td></tr>
+      <tr><td>False Accept Rate</td><td>${evalFmtPct(da.false_accept_rate)} (${da.false_accept_count ?? 0})</td></tr>
+      <tr><td>False Reject Rate</td><td>${evalFmtPct(da.false_reject_rate)} (${da.false_reject_count ?? 0})</td></tr>
+    </tbody></table>
+    <p class="eval-caption">Dihitung dari prefix status ground truth ("OK.../"Tolak...") vs keputusan sistem, dibandingkan HANYA pada record yang punya ground truth &amp; keputusan (record lain dikecualikan, bukan dianggap salah). Keputusan "Review" dari sistem dihitung SAMA seperti "Tolak" (bukan approval otomatis) -- ${da.review_folded_into_tolak_count ?? 0} record Review ikut dilipat ke kategori Tolak untuk skor ini.</p>`;
 
   const fieldRows = Object.entries(data.field_accuracy || {}).map(([field, s]) => `
     <tr>
@@ -2057,7 +2068,7 @@ function renderEvaluationModal(data) {
   const noteHtml = `<div class="eval-section-title">Catatan Evaluasi</div>
     <p class="eval-caption">Documents Total pada sesi ini: ${data.documents_total ?? "N/A"}. Precision/Recall/F1 hanya valid untuk field kategorikal dengan kelas tetap (Tenor, Bentuk Reward) -- field teks/angka lain (Nama, Nomor Rekening, Nominal) hanya diukur dari Accuracy.</p>`;
 
-  evalModalBody.innerHTML = summaryHtml + fieldTableHtml + cmHtml + runtimeHtml + extractionStatusHtml + noteHtml;
+  evalModalBody.innerHTML = summaryHtml + decisionAccuracyHtml + fieldTableHtml + cmHtml + runtimeHtml + extractionStatusHtml + noteHtml;
 }
 
 if (sheetEvalBtn) sheetEvalBtn.addEventListener("click", openEvaluationModal);

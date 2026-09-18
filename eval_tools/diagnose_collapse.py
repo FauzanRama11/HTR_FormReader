@@ -37,11 +37,15 @@ import sys
 import time
 from pathlib import Path
 
+# Dijalankan langsung (`python eval_tools/diagnose_collapse.py ...`), jadi
+# sys.path[0] = folder eval_tools/ ini sendiri -- root harus ditambah manual.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import cv2
 
-import extractors as ex
-import preprocessing as prep
-import vlm
+import extractors.extractors as ex
+from pipeline import preprocessing as prep
+from pipeline import vlm
 
 OUT_DIR = Path("eval_runs/collapse_diagnosis")
 OUT_DIR.mkdir(parents=True, exist_ok=True)

@@ -18,6 +18,8 @@ import cv2
 import numpy as np
 import pymupdf as fitz
 
+from core.paths import ASSETS_DIR, PROJECT_ROOT
+
 
 # ============================================================================
 # CONFIG
@@ -120,9 +122,8 @@ LINE_GAP_MAX_RATIO = 0.9         # jarak maksimum antar baris tinta agar diangga
 MAX_INK_LINES = 2                # maksimum baris yang diambil (baris utama + 1 baris bawah)
 INK_BAND_MERGE_GAP = 3           # px kosong yang masih dianggap satu goresan (bukan baris baru)
 
-BASE_DIR = Path(__file__).resolve().parent
-_ASSET_TEMPLATE = BASE_DIR / "assets" / "template.pdf"
-_LOCAL_TEMPLATE = BASE_DIR / "template.pdf"
+_ASSET_TEMPLATE = ASSETS_DIR / "template.pdf"
+_LOCAL_TEMPLATE = PROJECT_ROOT / "template.pdf"
 TEMPLATE_PATH = str(_ASSET_TEMPLATE if _ASSET_TEMPLATE.exists() else _LOCAL_TEMPLATE)
 
 _template_static_text_cache = None
